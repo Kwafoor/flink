@@ -39,7 +39,6 @@ import java.time.LocalTime;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -48,8 +47,7 @@ import java.util.stream.Stream;
 import static org.apache.flink.table.api.Expressions.call;
 import static org.apache.flink.table.api.Expressions.range;
 import static org.apache.flink.table.api.Expressions.withColumns;
-import static org.hamcrest.CoreMatchers.equalTo;
-import static org.junit.Assert.assertThat;
+import static org.assertj.core.api.Assertions.assertThat;
 
 /** End to end tests for {@link org.apache.flink.table.api.TableEnvironment#fromValues}. */
 public class ValuesITCase extends StreamingTestBase {
@@ -183,7 +181,7 @@ public class ValuesITCase extends StreamingTestBase {
                                         })));
 
         List<Row> actual = TestCollectionTableFactory.getResult();
-        assertThat(new HashSet<>(actual), equalTo(new HashSet<>(expected)));
+        assertThat(actual).containsExactlyInAnyOrderElementsOf(expected);
     }
 
     @Test
@@ -267,7 +265,7 @@ public class ValuesITCase extends StreamingTestBase {
         t.executeInsert("SinkTable").await();
 
         List<Row> actual = TestCollectionTableFactory.getResult();
-        assertThat(new HashSet<>(actual), equalTo(new HashSet<>(data)));
+        assertThat(actual).containsExactlyInAnyOrderElementsOf(data);
     }
 
     @Test
@@ -325,7 +323,7 @@ public class ValuesITCase extends StreamingTestBase {
                         Row.of(
                                 "2,2,2,2,2.2,2.2,2.2,false,02:02:02,0002-02-02,0002-02-02T02:02:02.000000002,"
                                         + "1970-01-01T00:00:00.002Z,2,[2],[2.2],{2=2.2}"));
-        assertThat(new HashSet<>(actual), equalTo(new HashSet<>(expected)));
+        assertThat(actual).containsExactlyInAnyOrderElementsOf(expected);
     }
 
     @Test
@@ -334,14 +332,30 @@ public class ValuesITCase extends StreamingTestBase {
         mapData.put(1, 1);
         mapData.put(2, 2);
 
-        Row row = Row.of(mapData, Row.of(1, 2, 3), new Integer[] {1, 2});
+        Row row = Row.of(mapData, Row.of(1, 2, 3), new int[] {1, 2});
         Table values = tEnv().fromValues(Collections.singletonList(row));
         tEnv().createTemporaryView("values_t", values);
         List<Row> results =
                 CollectionUtil.iteratorToList(
                         tEnv().executeSql("select * from values_t").collect());
 
-        assertThat(results, equalTo(Collections.singletonList(row)));
+        assertThat(results).containsExactly(row);
+    }
+
+    @Test
+    public void testArrayWithNullablePrimitiveType() {
+        Map<Integer, Integer> mapData = new HashMap<>();
+        mapData.put(1, 1);
+        mapData.put(2, 2);
+
+        Row row = Row.of(mapData, Row.of(1, 2, 3), new Integer[] {1, 2, null});
+        Table values = tEnv().fromValues(Collections.singletonList(row));
+        tEnv().createTemporaryView("values_t", values);
+        List<Row> results =
+                CollectionUtil.iteratorToList(
+                        tEnv().executeSql("select * from values_t").collect());
+
+        assertThat(results).containsExactly(row);
     }
 
     /**

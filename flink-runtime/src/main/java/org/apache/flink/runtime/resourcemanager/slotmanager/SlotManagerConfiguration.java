@@ -34,6 +34,8 @@ import org.apache.flink.util.Preconditions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.time.Duration;
+
 /** Configuration for the {@link SlotManager}. */
 public class SlotManagerConfiguration {
 
@@ -42,8 +44,11 @@ public class SlotManagerConfiguration {
     private final Time taskManagerRequestTimeout;
     private final Time slotRequestTimeout;
     private final Time taskManagerTimeout;
+    private final Duration requirementCheckDelay;
+    private final Duration declareNeededResourceDelay;
     private final boolean waitResultConsumedBeforeRelease;
     private final SlotMatchingStrategy slotMatchingStrategy;
+    private final boolean evenlySpreadOutSlots;
     private final WorkerResourceSpec defaultWorkerResourceSpec;
     private final int numSlotsPerWorker;
     private final int maxSlotNum;
@@ -55,8 +60,11 @@ public class SlotManagerConfiguration {
             Time taskManagerRequestTimeout,
             Time slotRequestTimeout,
             Time taskManagerTimeout,
+            Duration requirementCheckDelay,
+            Duration declareNeededResourceDelay,
             boolean waitResultConsumedBeforeRelease,
             SlotMatchingStrategy slotMatchingStrategy,
+            boolean evenlySpreadOutSlots,
             WorkerResourceSpec defaultWorkerResourceSpec,
             int numSlotsPerWorker,
             int maxSlotNum,
@@ -67,8 +75,11 @@ public class SlotManagerConfiguration {
         this.taskManagerRequestTimeout = Preconditions.checkNotNull(taskManagerRequestTimeout);
         this.slotRequestTimeout = Preconditions.checkNotNull(slotRequestTimeout);
         this.taskManagerTimeout = Preconditions.checkNotNull(taskManagerTimeout);
+        this.requirementCheckDelay = Preconditions.checkNotNull(requirementCheckDelay);
+        this.declareNeededResourceDelay = Preconditions.checkNotNull(declareNeededResourceDelay);
         this.waitResultConsumedBeforeRelease = waitResultConsumedBeforeRelease;
         this.slotMatchingStrategy = Preconditions.checkNotNull(slotMatchingStrategy);
+        this.evenlySpreadOutSlots = evenlySpreadOutSlots;
         this.defaultWorkerResourceSpec = Preconditions.checkNotNull(defaultWorkerResourceSpec);
         Preconditions.checkState(numSlotsPerWorker > 0);
         Preconditions.checkState(maxSlotNum > 0);
@@ -92,12 +103,24 @@ public class SlotManagerConfiguration {
         return taskManagerTimeout;
     }
 
+    public Duration getRequirementCheckDelay() {
+        return requirementCheckDelay;
+    }
+
+    public Duration getDeclareNeededResourceDelay() {
+        return declareNeededResourceDelay;
+    }
+
     public boolean isWaitResultConsumedBeforeRelease() {
         return waitResultConsumedBeforeRelease;
     }
 
     public SlotMatchingStrategy getSlotMatchingStrategy() {
         return slotMatchingStrategy;
+    }
+
+    public boolean isEvenlySpreadOutSlots() {
+        return evenlySpreadOutSlots;
     }
 
     public WorkerResourceSpec getDefaultWorkerResourceSpec() {
@@ -136,6 +159,12 @@ public class SlotManagerConfiguration {
                 Time.milliseconds(
                         configuration.getLong(ResourceManagerOptions.TASK_MANAGER_TIMEOUT));
 
+        final Duration requirementCheckDelay =
+                configuration.get(ResourceManagerOptions.REQUIREMENTS_CHECK_DELAY);
+
+        final Duration declareNeededResourceDelay =
+                configuration.get(ResourceManagerOptions.DECLARE_NEEDED_RESOURCE_DELAY);
+
         boolean waitResultConsumedBeforeRelease =
                 configuration.getBoolean(
                         ResourceManagerOptions.TASK_MANAGER_RELEASE_WHEN_RESULT_CONSUMED);
@@ -158,8 +187,11 @@ public class SlotManagerConfiguration {
                 rpcTimeout,
                 slotRequestTimeout,
                 taskManagerTimeout,
+                requirementCheckDelay,
+                declareNeededResourceDelay,
                 waitResultConsumedBeforeRelease,
                 slotMatchingStrategy,
+                evenlySpreadOutSlots,
                 defaultWorkerResourceSpec,
                 numSlotsPerWorker,
                 maxSlotNum,
@@ -196,8 +228,8 @@ public class SlotManagerConfiguration {
                                         ? new CPUResource(Double.MAX_VALUE)
                                         : defaultWorkerResourceSpec
                                                 .getCpuCores()
-                                                .divide(defaultWorkerResourceSpec.getNumSlots())
-                                                .multiply(maxSlotNum));
+                                                .multiply(maxSlotNum)
+                                                .divide(defaultWorkerResourceSpec.getNumSlots()));
     }
 
     private static MemorySize getMaxTotalMem(
@@ -212,7 +244,12 @@ public class SlotManagerConfiguration {
                                         ? MemorySize.MAX_VALUE
                                         : defaultWorkerResourceSpec
                                                 .getTotalMemSize()
-                                                .divide(defaultWorkerResourceSpec.getNumSlots())
-                                                .multiply(maxSlotNum));
+                                                // In theory, there is a possibility of long
+                                                // overflow here. However, in actual scenarios, for
+                                                // a 1TB of TM memory and a very large number of
+                                                // maxSlotNum (e.g. 1_000_000), there is still no
+                                                // overflow.
+                                                .multiply(maxSlotNum)
+                                                .divide(defaultWorkerResourceSpec.getNumSlots()));
     }
 }

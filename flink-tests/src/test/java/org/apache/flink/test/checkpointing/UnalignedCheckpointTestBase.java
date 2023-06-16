@@ -148,7 +148,7 @@ public abstract class UnalignedCheckpointTestBase extends TestLogger {
         // ChangelogStateBackend is used.
         // Doing it on cluster level unconditionally as randomization currently happens on the job
         // level (environment); while this factory can only be set on the cluster level.
-        FsStateChangelogStorageFactory.configure(conf, temp.newFolder());
+        FsStateChangelogStorageFactory.configure(conf, temp.newFolder(), Duration.ofMinutes(1), 10);
 
         final StreamGraph streamGraph = getStreamGraph(settings, conf);
         final int requiredSlots =
@@ -207,7 +207,8 @@ public abstract class UnalignedCheckpointTestBase extends TestLogger {
                 setupEnv,
                 settings.minCheckpoints,
                 settings.channelType.slotSharing,
-                settings.expectedFailures - settings.failuresAfterSourceFinishes);
+                settings.expectedFailures - settings.failuresAfterSourceFinishes,
+                settings.sourceSleepMs);
 
         return setupEnv.getStreamGraph();
     }
@@ -221,16 +222,19 @@ public abstract class UnalignedCheckpointTestBase extends TestLogger {
         private final int numSplits;
         private final int expectedRestarts;
         private final long checkpointingInterval;
+        private final long sourceSleepMs;
 
         protected LongSource(
                 int minCheckpoints,
                 int numSplits,
                 int expectedRestarts,
-                long checkpointingInterval) {
+                long checkpointingInterval,
+                long sourceSleepMs) {
             this.minCheckpoints = minCheckpoints;
             this.numSplits = numSplits;
             this.expectedRestarts = expectedRestarts;
             this.checkpointingInterval = checkpointingInterval;
+            this.sourceSleepMs = sourceSleepMs;
         }
 
         @Override
@@ -244,7 +248,8 @@ public abstract class UnalignedCheckpointTestBase extends TestLogger {
                     readerContext.getIndexOfSubtask(),
                     minCheckpoints,
                     expectedRestarts,
-                    checkpointingInterval);
+                    checkpointingInterval,
+                    sourceSleepMs);
         }
 
         @Override
@@ -285,17 +290,20 @@ public abstract class UnalignedCheckpointTestBase extends TestLogger {
             private int numCompletedCheckpoints;
             private boolean finishing;
             private boolean recovered;
+            private final long sourceSleepMs;
             @Nullable private Deadline pumpingUntil = null;
 
             public LongSourceReader(
                     int subtaskIndex,
                     int minCheckpoints,
                     int expectedRestarts,
-                    long checkpointingInterval) {
+                    long checkpointingInterval,
+                    long sourceSleepMs) {
                 this.subtaskIndex = subtaskIndex;
                 this.minCheckpoints = minCheckpoints;
                 this.expectedRestarts = expectedRestarts;
-                pumpInterval = Duration.ofMillis(checkpointingInterval);
+                this.pumpInterval = Duration.ofMillis(checkpointingInterval);
+                this.sourceSleepMs = sourceSleepMs;
             }
 
             @Override
@@ -304,6 +312,9 @@ public abstract class UnalignedCheckpointTestBase extends TestLogger {
             @Override
             public InputStatus pollNext(ReaderOutput<Long> output) throws InterruptedException {
                 for (LongSplit split : splits) {
+                    if (sourceSleepMs > 0L) {
+                        Thread.sleep(sourceSleepMs);
+                    }
                     output.collect(withHeader(split.nextNumber), split.nextNumber);
                     split.nextNumber += split.increment;
                 }
@@ -627,7 +638,8 @@ public abstract class UnalignedCheckpointTestBase extends TestLogger {
                 StreamExecutionEnvironment environment,
                 int minCheckpoints,
                 boolean slotSharing,
-                int expectedFailuresUntilSourceFinishes);
+                int expectedFailuresUntilSourceFinishes,
+                long sourceSleepMs);
     }
 
     /** Which channels are used to connect the tasks. */
@@ -664,6 +676,7 @@ public abstract class UnalignedCheckpointTestBase extends TestLogger {
         private int failuresAfterSourceFinishes = 0;
         private ChannelType channelType = ChannelType.MIXED;
         private int buffersPerChannel = 1;
+        private long sourceSleepMs = 0;
 
         public UnalignedSettings(DagCreator dagCreator) {
             this.dagCreator = dagCreator;
@@ -719,6 +732,11 @@ public abstract class UnalignedCheckpointTestBase extends TestLogger {
             return this;
         }
 
+        public UnalignedSettings setSourceSleepMs(long sourceSleepMs) {
+            this.sourceSleepMs = sourceSleepMs;
+            return this;
+        }
+
         public void configure(StreamExecutionEnvironment env) {
             env.enableCheckpointing(Math.max(100L, parallelism * 50L));
             env.getCheckpointConfig().setAlignmentTimeout(Duration.ofMillis(alignmentTimeout));
@@ -757,9 +775,15 @@ public abstract class UnalignedCheckpointTestBase extends TestLogger {
 
             conf.set(
                     ShuffleServiceOptions.SHUFFLE_SERVICE_FACTORY_CLASS,
-                    "org.apache.flink.test.checkpointing.SharedPoolNettyShuffleServiceFactory");
+                    SharedPoolNettyShuffleServiceFactory.class.getName());
             conf.set(NettyShuffleEnvironmentOptions.NETWORK_BUFFERS_PER_CHANNEL, buffersPerChannel);
             conf.set(NettyShuffleEnvironmentOptions.NETWORK_REQUEST_BACKOFF_MAX, 60000);
+            // half memory consumption of network buffers (default is 64mb), as some tests spawn a
+            // large number of task managers (25)
+            // 12mb was sufficient to run the tests, so 32mb should put us above the recommended
+            // amount of buffers
+            conf.set(TaskManagerOptions.NETWORK_MEMORY_MIN, MemorySize.ofMebiBytes(32));
+            conf.set(TaskManagerOptions.NETWORK_MEMORY_MAX, MemorySize.ofMebiBytes(32));
             conf.set(AkkaOptions.ASK_TIMEOUT_DURATION, Duration.ofMinutes(1));
             return conf;
         }
@@ -785,6 +809,8 @@ public abstract class UnalignedCheckpointTestBase extends TestLogger {
                     + failuresAfterSourceFinishes
                     + ", channelType="
                     + channelType
+                    + ", sourceSleepMs="
+                    + sourceSleepMs
                     + '}';
         }
     }

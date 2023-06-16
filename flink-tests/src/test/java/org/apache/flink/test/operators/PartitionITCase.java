@@ -49,6 +49,7 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 
+import static org.apache.flink.test.util.TestBaseUtils.compareResultAsText;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
@@ -717,7 +718,8 @@ public class PartitionITCase extends MultipleProgramsTestBase {
         }
     }
 
-    private static class ComparablePojo implements Comparable<ComparablePojo> {
+    /** A comparable POJO. */
+    public static class ComparablePojo implements Comparable<ComparablePojo> {
         private Long first;
         private Long second;
 
@@ -773,6 +775,9 @@ public class PartitionITCase extends MultipleProgramsTestBase {
         @Override
         public void mapPartition(Iterable<T> values, Collector<Tuple2<T, T>> out) throws Exception {
             Iterator<T> itr = values.iterator();
+            if (!itr.hasNext()) {
+                return;
+            }
             T min = itr.next();
             T max = min;
             T value;

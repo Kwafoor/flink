@@ -40,11 +40,12 @@ import org.apache.flink.kubernetes.entrypoint.KubernetesApplicationClusterEntryp
 import org.apache.flink.kubernetes.entrypoint.KubernetesSessionClusterEntrypoint;
 import org.apache.flink.kubernetes.kubeclient.Endpoint;
 import org.apache.flink.kubernetes.kubeclient.FlinkKubeClient;
+import org.apache.flink.kubernetes.kubeclient.FlinkKubeClientFactory;
 import org.apache.flink.kubernetes.kubeclient.FlinkPod;
 import org.apache.flink.kubernetes.kubeclient.KubernetesJobManagerSpecification;
+import org.apache.flink.kubernetes.kubeclient.decorators.ExternalServiceDecorator;
 import org.apache.flink.kubernetes.kubeclient.factory.KubernetesJobManagerFactory;
 import org.apache.flink.kubernetes.kubeclient.parameters.KubernetesJobManagerParameters;
-import org.apache.flink.kubernetes.kubeclient.resources.KubernetesService;
 import org.apache.flink.kubernetes.utils.Constants;
 import org.apache.flink.kubernetes.utils.KubernetesUtils;
 import org.apache.flink.runtime.entrypoint.ClusterEntrypoint;
@@ -74,13 +75,17 @@ public class KubernetesClusterDescriptor implements ClusterDescriptor<String> {
 
     private final Configuration flinkConfig;
 
+    private final FlinkKubeClientFactory clientFactory;
+
     private final FlinkKubeClient client;
 
     private final String clusterId;
 
-    public KubernetesClusterDescriptor(Configuration flinkConfig, FlinkKubeClient client) {
+    public KubernetesClusterDescriptor(
+            Configuration flinkConfig, FlinkKubeClientFactory clientFactory) {
         this.flinkConfig = flinkConfig;
-        this.client = client;
+        this.clientFactory = clientFactory;
+        this.client = clientFactory.fromConfiguration(flinkConfig, "client");
         this.clusterId =
                 checkNotNull(
                         flinkConfig.getString(KubernetesConfigOptions.CLUSTER_ID),
@@ -96,7 +101,11 @@ public class KubernetesClusterDescriptor implements ClusterDescriptor<String> {
         return () -> {
             final Configuration configuration = new Configuration(flinkConfig);
 
-            final Optional<Endpoint> restEndpoint = client.getRestEndpoint(clusterId);
+            final Optional<Endpoint> restEndpoint;
+            try (FlinkKubeClient client =
+                    clientFactory.fromConfiguration(configuration, "client")) {
+                restEndpoint = client.getRestEndpoint(clusterId);
+            }
 
             if (restEndpoint.isPresent()) {
                 configuration.setString(RestOptions.ADDRESS, restEndpoint.get().getAddress());
@@ -177,7 +186,8 @@ public class KubernetesClusterDescriptor implements ClusterDescriptor<String> {
             final ClusterSpecification clusterSpecification,
             final ApplicationConfiguration applicationConfiguration)
             throws ClusterDeploymentException {
-        if (client.getService(KubernetesService.ServiceType.REST_SERVICE, clusterId).isPresent()) {
+        if (client.getService(ExternalServiceDecorator.getExternalServiceName(clusterId))
+                .isPresent()) {
             throw new ClusterDeploymentException(
                     "The Flink cluster " + clusterId + " already exists.");
         }

@@ -15,7 +15,10 @@
 #  See the License for the specific language governing permissions and
 # limitations under the License.
 ################################################################################
+import warnings
+
 from pyflink.java_gateway import get_gateway
+from pyflink.util.java_utils import create_url_class_loader
 
 from pyflink.common import Configuration
 
@@ -37,18 +40,27 @@ class EnvironmentSettings(object):
         ...     .with_built_in_database_name("my_database") \\
         ...     .build()
 
-    :func:`EnvironmentSettings.in_streaming_mode` or :func:`EnvironmentSettings.in_batch_mode`
+    :func:`~EnvironmentSettings.in_streaming_mode` or :func:`~EnvironmentSettings.in_batch_mode`
     might be convenient as shortcuts.
     """
 
     class Builder(object):
         """
-        A builder for :class:`EnvironmentSettings`.
+        A builder for :class:`~EnvironmentSettings`.
         """
 
         def __init__(self):
             gateway = get_gateway()
             self._j_builder = gateway.jvm.EnvironmentSettings.Builder()
+
+        def with_configuration(self, config: Configuration) -> 'EnvironmentSettings.Builder':
+            """
+            Creates the EnvironmentSetting with specified Configuration.
+
+            :return: EnvironmentSettings.
+            """
+            self._j_builder = self._j_builder.withConfiguration(config._j_configuration)
+            return self
 
         def in_batch_mode(self) -> 'EnvironmentSettings.Builder':
             """
@@ -118,6 +130,10 @@ class EnvironmentSettings(object):
 
             :return: an immutable instance of EnvironmentSettings.
             """
+            gateway = get_gateway()
+            context_classloader = gateway.jvm.Thread.currentThread().getContextClassLoader()
+            new_classloader = create_url_class_loader([], context_classloader)
+            gateway.jvm.Thread.currentThread().setContextClassLoader(new_classloader)
             return EnvironmentSettings(self._j_builder.build())
 
     def __init__(self, j_environment_settings):
@@ -155,8 +171,20 @@ class EnvironmentSettings(object):
         Convert to `pyflink.common.Configuration`.
 
         :return: Configuration with specified value.
+
+        .. note:: Deprecated in 1.15. Please use
+                :func:`EnvironmentSettings.get_configuration` instead.
         """
+        warnings.warn("Deprecated in 1.15.", DeprecationWarning)
         return Configuration(j_configuration=self._j_environment_settings.toConfiguration())
+
+    def get_configuration(self) -> Configuration:
+        """
+        Get the underlying `pyflink.common.Configuration`.
+
+        :return: Configuration with specified value.
+        """
+        return Configuration(j_configuration=self._j_environment_settings.getConfiguration())
 
     @staticmethod
     def new_instance() -> 'EnvironmentSettings.Builder':
@@ -173,7 +201,15 @@ class EnvironmentSettings(object):
         Creates the EnvironmentSetting with specified Configuration.
 
         :return: EnvironmentSettings.
+
+        .. note:: Deprecated in 1.15. Please use
+                :func:`EnvironmentSettings.Builder.with_configuration` instead.
         """
+        warnings.warn("Deprecated in 1.15.", DeprecationWarning)
+        gateway = get_gateway()
+        context_classloader = gateway.jvm.Thread.currentThread().getContextClassLoader()
+        new_classloader = create_url_class_loader([], context_classloader)
+        gateway.jvm.Thread.currentThread().setContextClassLoader(new_classloader)
         return EnvironmentSettings(
             get_gateway().jvm.EnvironmentSettings.fromConfiguration(config._j_configuration))
 
@@ -190,8 +226,7 @@ class EnvironmentSettings(object):
 
         :return: EnvironmentSettings.
         """
-        return EnvironmentSettings(
-            get_gateway().jvm.EnvironmentSettings.inStreamingMode())
+        return EnvironmentSettings.new_instance().in_streaming_mode().build()
 
     @staticmethod
     def in_batch_mode() -> 'EnvironmentSettings':
@@ -207,5 +242,4 @@ class EnvironmentSettings(object):
 
         :return: EnvironmentSettings.
         """
-        return EnvironmentSettings(
-            get_gateway().jvm.EnvironmentSettings.inBatchMode())
+        return EnvironmentSettings.new_instance().in_batch_mode().build()

@@ -41,6 +41,24 @@ public class TableConfigOptions {
     private TableConfigOptions() {}
 
     @Documentation.TableOption(execMode = Documentation.ExecMode.BATCH_STREAMING)
+    public static final ConfigOption<String> TABLE_CATALOG_NAME =
+            key("table.builtin-catalog-name")
+                    .stringType()
+                    .defaultValue("default_catalog")
+                    .withDescription(
+                            "The name of the initial catalog to be created when "
+                                    + "instantiating a TableEnvironment.");
+
+    @Documentation.TableOption(execMode = Documentation.ExecMode.BATCH_STREAMING)
+    public static final ConfigOption<String> TABLE_DATABASE_NAME =
+            key("table.builtin-database-name")
+                    .stringType()
+                    .defaultValue("default_database")
+                    .withDescription(
+                            "The name of the default database in the initial catalog to be created "
+                                    + "when instantiating TableEnvironment.");
+
+    @Documentation.TableOption(execMode = Documentation.ExecMode.BATCH_STREAMING)
     public static final ConfigOption<Boolean> TABLE_DML_SYNC =
             key("table.dml-sync")
                     .booleanType()
@@ -83,6 +101,16 @@ public class TableConfigOptions {
                                     + "However, when converting to data types that don't include a time zone (e.g. TIMESTAMP, TIME, or simply STRING), "
                                     + "the session time zone is used during conversion. The input of option is either a full name "
                                     + "such as \"America/Los_Angeles\", or a custom timezone id such as \"GMT-08:00\".");
+
+    @Documentation.TableOption(execMode = Documentation.ExecMode.BATCH_STREAMING)
+    public static final ConfigOption<Integer> DISPLAY_MAX_COLUMN_WIDTH =
+            key("table.display.max-column-width")
+                    .intType()
+                    .defaultValue(30)
+                    .withDescription(
+                            "When printing the query results to the client console, this parameter determines the number of characters shown on screen before truncating. "
+                                    + "This only applies to columns with variable-length types (e.g. STRING) in the streaming mode. "
+                                    + "Fixed-length types are printed in the batch mode using a deterministic column width.");
 
     // ------------------------------------------------------------------------------------------
     // Options for plan handling
@@ -159,6 +187,15 @@ public class TableConfigOptions {
                     .defaultValue(10000)
                     .withDescription(
                             "Specifies a threshold where class members of generated code will be grouped into arrays by types.");
+
+    @Documentation.TableOption(execMode = Documentation.ExecMode.BATCH_STREAMING)
+    @Documentation.OverrideDefault("System.getProperty(\"java.io.tmpdir\")")
+    public static final ConfigOption<String> RESOURCES_DOWNLOAD_DIR =
+            key("table.resources.download-dir")
+                    .stringType()
+                    .defaultValue(System.getProperty("java.io.tmpdir"))
+                    .withDescription(
+                            "Local directory that is used by planner for storing downloaded resources.");
 
     // ------------------------------------------------------------------------------------------
     // Enum option types

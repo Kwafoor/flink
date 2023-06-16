@@ -101,8 +101,24 @@ public class RocksDBStateBackendConfigTest {
         final File logFile = File.createTempFile(getClass().getSimpleName() + "-", ".log");
         // set the environment variable 'log.file' with the Flink log file location
         System.setProperty("log.file", logFile.getPath());
-        try (RocksDBResourceContainer container = backend.createOptionsAndResourceContainer()) {
+        try (RocksDBResourceContainer container = backend.createOptionsAndResourceContainer(null)) {
+            assertEquals(
+                    RocksDBConfigurableOptions.LOG_LEVEL.defaultValue(),
+                    container.getDbOptions().infoLogLevel());
             assertEquals(logFile.getParent(), container.getDbOptions().dbLogDir());
+        } finally {
+            logFile.delete();
+        }
+
+        StringBuilder longInstanceBasePath =
+                new StringBuilder(tempFolder.newFolder().getAbsolutePath());
+        while (longInstanceBasePath.length() < 255) {
+            longInstanceBasePath.append("/append-for-long-path");
+        }
+        try (RocksDBResourceContainer container =
+                backend.createOptionsAndResourceContainer(
+                        new File(longInstanceBasePath.toString()))) {
+            assertTrue(container.getDbOptions().dbLogDir().isEmpty());
         } finally {
             logFile.delete();
         }
@@ -499,6 +515,8 @@ public class RocksDBStateBackendConfigTest {
             verifyIllegalArgument(RocksDBConfigurableOptions.COMPACTION_STYLE, "LEV");
             verifyIllegalArgument(RocksDBConfigurableOptions.USE_BLOOM_FILTER, "NO");
             verifyIllegalArgument(RocksDBConfigurableOptions.BLOOM_FILTER_BLOCK_BASED_MODE, "YES");
+            verifyIllegalArgument(
+                    RocksDBConfigurableOptions.RESTORE_OVERLAP_FRACTION_THRESHOLD, "2");
         }
 
         // verify legal configuration
@@ -521,10 +539,12 @@ public class RocksDBStateBackendConfigTest {
             configuration.setString(RocksDBConfigurableOptions.METADATA_BLOCK_SIZE.key(), "8 kb");
             configuration.setString(RocksDBConfigurableOptions.BLOCK_CACHE_SIZE.key(), "512 mb");
             configuration.setString(RocksDBConfigurableOptions.USE_BLOOM_FILTER.key(), "TRUE");
+            configuration.setString(
+                    RocksDBConfigurableOptions.RESTORE_OVERLAP_FRACTION_THRESHOLD.key(), "0.5");
 
             try (RocksDBResourceContainer optionsContainer =
                     new RocksDBResourceContainer(
-                            configuration, PredefinedOptions.DEFAULT, null, null)) {
+                            configuration, PredefinedOptions.DEFAULT, null, null, null, false)) {
 
                 DBOptions dbOptions = optionsContainer.getDbOptions();
                 assertEquals(-1, dbOptions.maxOpenFiles());
@@ -603,7 +623,12 @@ public class RocksDBStateBackendConfigTest {
         configuration.set(RocksDBConfigurableOptions.COMPACTION_STYLE, CompactionStyle.UNIVERSAL);
         try (final RocksDBResourceContainer optionsContainer =
                 new RocksDBResourceContainer(
-                        configuration, PredefinedOptions.SPINNING_DISK_OPTIMIZED, null, null)) {
+                        configuration,
+                        PredefinedOptions.SPINNING_DISK_OPTIMIZED,
+                        null,
+                        null,
+                        null,
+                        false)) {
 
             final ColumnFamilyOptions columnFamilyOptions = optionsContainer.getColumnOptions();
             assertNotNull(columnFamilyOptions);
@@ -615,7 +640,9 @@ public class RocksDBStateBackendConfigTest {
                         new Configuration(),
                         PredefinedOptions.SPINNING_DISK_OPTIMIZED,
                         null,
-                        null)) {
+                        null,
+                        null,
+                        false)) {
 
             final ColumnFamilyOptions columnFamilyOptions = optionsContainer.getColumnOptions();
             assertNotNull(columnFamilyOptions);
@@ -762,6 +789,24 @@ public class RocksDBStateBackendConfigTest {
         } catch (IllegalArgumentException expected) {
             // expected exception
         }
+    }
+
+    @Test
+    public void testDefaultRestoreOverlapThreshold() {
+        EmbeddedRocksDBStateBackend rocksDBStateBackend = new EmbeddedRocksDBStateBackend(true);
+        assertTrue(
+                RocksDBConfigurableOptions.RESTORE_OVERLAP_FRACTION_THRESHOLD.defaultValue()
+                        == rocksDBStateBackend.getOverlapFractionThreshold());
+    }
+
+    @Test
+    public void testConfigureRestoreOverlapThreshold() {
+        EmbeddedRocksDBStateBackend rocksDBStateBackend = new EmbeddedRocksDBStateBackend(true);
+        Configuration configuration = new Configuration();
+        configuration.setDouble(RocksDBConfigurableOptions.RESTORE_OVERLAP_FRACTION_THRESHOLD, 0.3);
+        rocksDBStateBackend =
+                rocksDBStateBackend.configure(configuration, getClass().getClassLoader());
+        assertTrue(0.3 == rocksDBStateBackend.getOverlapFractionThreshold());
     }
 
     private void verifySetParameter(Runnable setter) {

@@ -469,6 +469,23 @@ class Catalog(object):
             j_catalog_table_statistics=self._j_catalog.getPartitionStatistics(
                 table_path._j_object_path, partition_spec._j_catalog_partition_spec))
 
+    def bulk_get_partition_statistics(self,
+                                      table_path: 'ObjectPath',
+                                      partition_specs: List['CatalogPartitionSpec']) \
+            -> List['CatalogTableStatistics']:
+        """
+        Get a list of statistics of given partitions.
+
+        :param table_path: Path :class:`ObjectPath` of the table.
+        :param partition_specs: The list of :class:`CatalogPartitionSpec` of the given partitions.
+        :return: The statistics list of :class:`CatalogTableStatistics` of the given partitions.
+        :raise: CatalogException in case of any runtime exception.
+                PartitionNotExistException if the partition does not exist.
+        """
+        return [CatalogTableStatistics(j_catalog_table_statistics=p)
+                for p in self._j_catalog.bulkGetPartitionStatistics(table_path._j_object_path,
+                partition_specs)]
+
     def get_partition_column_statistics(self,
                                         table_path: 'ObjectPath',
                                         partition_spec: 'CatalogPartitionSpec') \
@@ -485,6 +502,23 @@ class Catalog(object):
         return CatalogColumnStatistics(
             j_catalog_column_statistics=self._j_catalog.getPartitionColumnStatistics(
                 table_path._j_object_path, partition_spec._j_catalog_partition_spec))
+
+    def bulk_get_partition_column_statistics(self,
+                                             table_path: 'ObjectPath',
+                                             partition_specs: List['CatalogPartitionSpec']) \
+            -> List['CatalogColumnStatistics']:
+        """
+        Get a list of the column statistics for the given partitions.
+
+        :param table_path: Path :class:`ObjectPath` of the table.
+        :param partition_specs: The list of :class:`CatalogPartitionSpec` of the given partitions.
+        :return: The statistics list of :class:`CatalogTableStatistics` of the given partitions.
+        :raise: CatalogException in case of any runtime exception.
+                PartitionNotExistException if the partition does not exist.
+        """
+        return [CatalogColumnStatistics(j_catalog_column_statistics=p)
+                for p in self._j_catalog.bulkGetPartitionStatistics(
+                table_path._j_object_path, partition_specs)]
 
     def alter_table_statistics(self,
                                table_path: 'ObjectPath',
@@ -1130,13 +1164,14 @@ class HiveCatalog(Catalog):
     A catalog implementation for Hive.
     """
 
-    def __init__(self, catalog_name: str, default_database: str = None, hive_conf_dir: str = None):
+    def __init__(self, catalog_name: str, default_database: str = None, hive_conf_dir: str = None,
+                 hadoop_conf_dir: str = None, hive_version: str = None):
         assert catalog_name is not None
 
         gateway = get_gateway()
 
         j_hive_catalog = gateway.jvm.org.apache.flink.table.catalog.hive.HiveCatalog(
-            catalog_name, default_database, hive_conf_dir)
+            catalog_name, default_database, hive_conf_dir, hadoop_conf_dir, hive_version)
         super(HiveCatalog, self).__init__(j_hive_catalog)
 
 

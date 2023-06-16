@@ -20,6 +20,7 @@ package org.apache.flink.runtime.jobmanager;
 
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.runtime.jobgraph.JobGraph;
+import org.apache.flink.runtime.jobgraph.JobResourceRequirements;
 import org.apache.flink.runtime.persistence.ResourceVersion;
 import org.apache.flink.runtime.persistence.StateHandleStore;
 import org.apache.flink.runtime.state.RetrievableStateHandle;
@@ -38,6 +39,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
+import java.util.NoSuchElementException;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -242,6 +244,22 @@ public class DefaultJobGraphStore<R extends ResourceVersion<R>>
     }
 
     @Override
+    public void putJobResourceRequirements(
+            JobID jobId, JobResourceRequirements jobResourceRequirements) throws Exception {
+        synchronized (lock) {
+            @Nullable final JobGraph jobGraph = recoverJobGraph(jobId);
+            if (jobGraph == null) {
+                throw new NoSuchElementException(
+                        String.format(
+                                "JobGraph for job [%s] was not found in JobGraphStore and is needed for attaching JobResourceRequirements.",
+                                jobId));
+            }
+            JobResourceRequirements.writeToJobGraph(jobGraph, jobResourceRequirements);
+            putJobGraph(jobGraph);
+        }
+    }
+
+    @Override
     public CompletableFuture<Void> globalCleanupAsync(JobID jobId, Executor executor) {
         checkNotNull(jobId, "Job ID");
 
@@ -249,12 +267,10 @@ public class DefaultJobGraphStore<R extends ResourceVersion<R>>
                 () -> {
                     LOG.debug("Removing job graph {} from {}.", jobId, jobGraphStateHandleStore);
 
-                    if (addedJobGraphs.contains(jobId)) {
-                        final String name = jobGraphStoreUtil.jobIDToName(jobId);
-                        releaseAndRemoveOrThrowCompletionException(jobId, name);
+                    final String name = jobGraphStoreUtil.jobIDToName(jobId);
+                    releaseAndRemoveOrThrowCompletionException(jobId, name);
 
-                        addedJobGraphs.remove(jobId);
-                    }
+                    addedJobGraphs.remove(jobId);
 
                     LOG.info("Removed job graph {} from {}.", jobId, jobGraphStateHandleStore);
                 },

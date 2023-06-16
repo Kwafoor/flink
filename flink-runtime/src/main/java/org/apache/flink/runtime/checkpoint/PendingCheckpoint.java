@@ -107,10 +107,15 @@ public class PendingCheckpoint implements Checkpoint {
     /** The checkpoint properties. */
     private final CheckpointProperties props;
 
-    /** The promise to fulfill once the checkpoint has been completed. */
+    /**
+     * The promise to fulfill once the checkpoint has been completed. Note that it will be completed
+     * only after the checkpoint is successfully added to CompletedCheckpointStore.
+     */
     private final CompletableFuture<CompletedCheckpoint> onCompletionPromise;
 
     @Nullable private final PendingCheckpointStats pendingCheckpointStats;
+
+    private final CompletableFuture<Void> masterTriggerCompletionPromise;
 
     /** Target storage location to persist the checkpoint metadata to. */
     @Nullable private CheckpointStorageLocation targetLocation;
@@ -136,7 +141,8 @@ public class PendingCheckpoint implements Checkpoint {
             Collection<String> masterStateIdentifiers,
             CheckpointProperties props,
             CompletableFuture<CompletedCheckpoint> onCompletionPromise,
-            @Nullable PendingCheckpointStats pendingCheckpointStats) {
+            @Nullable PendingCheckpointStats pendingCheckpointStats,
+            CompletableFuture<Void> masterTriggerCompletionPromise) {
         checkArgument(
                 checkpointPlan.getTasksToWaitFor().size() > 0,
                 "Checkpoint needs at least one vertex that commits the checkpoint");
@@ -166,6 +172,7 @@ public class PendingCheckpoint implements Checkpoint {
         this.acknowledgedTasks = new HashSet<>(checkpointPlan.getTasksToWaitFor().size());
         this.onCompletionPromise = checkNotNull(onCompletionPromise);
         this.pendingCheckpointStats = pendingCheckpointStats;
+        this.masterTriggerCompletionPromise = checkNotNull(masterTriggerCompletionPromise);
     }
 
     // --------------------------------------------------------------------------------------------
@@ -176,12 +183,6 @@ public class PendingCheckpoint implements Checkpoint {
 
     public JobID getJobId() {
         return jobId;
-    }
-
-    /** @deprecated use {@link #getCheckpointID()} */
-    @Deprecated
-    public long getCheckpointId() {
-        return getCheckpointID();
     }
 
     @Override
@@ -320,7 +321,8 @@ public class PendingCheckpoint implements Checkpoint {
 
                 // write out the metadata
                 final CheckpointMetadata savepoint =
-                        new CheckpointMetadata(checkpointId, operatorStates.values(), masterStates);
+                        new CheckpointMetadata(
+                                checkpointId, operatorStates.values(), masterStates, props);
                 final CompletedCheckpointStorageLocation finalizedLocation;
 
                 try (CheckpointMetadataOutputStream out =
@@ -340,8 +342,6 @@ public class PendingCheckpoint implements Checkpoint {
                                 props,
                                 finalizedLocation,
                                 toCompletedCheckpointStats(finalizedLocation));
-
-                onCompletionPromise.complete(completed);
 
                 // mark this pending checkpoint as disposed, but do NOT drop the state
                 dispose(false, checkpointsCleaner, postCleanup, executor);
@@ -544,6 +544,7 @@ public class PendingCheckpoint implements Checkpoint {
         try {
             failureCause = new CheckpointException(reason, cause);
             onCompletionPromise.completeExceptionally(failureCause);
+            masterTriggerCompletionPromise.completeExceptionally(failureCause);
             assertAbortSubsumedForced(reason);
         } finally {
             dispose(true, checkpointsCleaner, postCleanup, executor);

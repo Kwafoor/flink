@@ -89,12 +89,12 @@ class KafkaWriter<IN>
     private final KafkaRecordSerializationSchema<IN> recordSerializer;
     private final Callback deliveryCallback;
     private final KafkaRecordSerializationSchema.KafkaSinkContext kafkaSinkContext;
-
+    private volatile Exception asyncProducerException;
     private final Map<String, KafkaMetricMutableWrapper> previouslyCreatedMetrics = new HashMap<>();
     private final SinkWriterMetricGroup metricGroup;
     private final boolean disabledMetrics;
-    private final Counter numRecordsSendCounter;
-    private final Counter numBytesSendCounter;
+    private final Counter numRecordsOutCounter;
+    private final Counter numBytesOutCounter;
     private final Counter numRecordsOutErrorsCounter;
     private final ProcessingTimeService timeService;
 
@@ -139,6 +139,7 @@ class KafkaWriter<IN>
         this.kafkaProducerConfig = checkNotNull(kafkaProducerConfig, "kafkaProducerConfig");
         this.transactionalIdPrefix = checkNotNull(transactionalIdPrefix, "transactionalIdPrefix");
         this.recordSerializer = checkNotNull(recordSerializer, "recordSerializer");
+        checkNotNull(sinkInitContext, "sinkInitContext");
         this.deliveryCallback =
                 new WriterCallback(
                         sinkInitContext.getMailboxExecutor(),
@@ -150,11 +151,10 @@ class KafkaWriter<IN>
                         || kafkaProducerConfig.containsKey(KEY_REGISTER_METRICS)
                                 && !Boolean.parseBoolean(
                                         kafkaProducerConfig.get(KEY_REGISTER_METRICS).toString());
-        checkNotNull(sinkInitContext, "sinkInitContext");
         this.timeService = sinkInitContext.getProcessingTimeService();
         this.metricGroup = sinkInitContext.metricGroup();
-        this.numBytesSendCounter = metricGroup.getNumBytesSendCounter();
-        this.numRecordsSendCounter = metricGroup.getNumRecordsSendCounter();
+        this.numBytesOutCounter = metricGroup.getIOMetricGroup().getNumBytesOutCounter();
+        this.numRecordsOutCounter = metricGroup.getIOMetricGroup().getNumRecordsOutCounter();
         this.numRecordsOutErrorsCounter = metricGroup.getNumRecordsOutErrorsCounter();
         this.kafkaSinkContext =
                 new DefaultKafkaSinkContext(
@@ -191,11 +191,14 @@ class KafkaWriter<IN>
     }
 
     @Override
-    public void write(IN element, Context context) throws IOException {
+    public void write(@Nullable IN element, Context context) throws IOException {
+        checkAsyncException();
         final ProducerRecord<byte[], byte[]> record =
                 recordSerializer.serialize(element, kafkaSinkContext, context.timestamp());
-        currentProducer.send(record, deliveryCallback);
-        numRecordsSendCounter.inc();
+        if (record != null) {
+            currentProducer.send(record, deliveryCallback);
+            numRecordsOutCounter.inc();
+        }
     }
 
     @Override
@@ -204,6 +207,8 @@ class KafkaWriter<IN>
             LOG.debug("final flush={}", endOfInput);
             currentProducer.flush();
         }
+
+        checkAsyncException();
     }
 
     @Override
@@ -239,6 +244,9 @@ class KafkaWriter<IN>
                     checkState(currentProducer.isClosed());
                     currentProducer = null;
                 });
+
+        // Rethrow exception for the case in which close is called before writer() and flush().
+        checkAsyncException();
     }
 
     private void abortCurrentProducer() {
@@ -388,11 +396,27 @@ class KafkaWriter<IN>
                     long outgoingBytesUntilNow = ((Number) byteOutMetric.metricValue()).longValue();
                     long outgoingBytesSinceLastUpdate =
                             outgoingBytesUntilNow - latestOutgoingByteTotal;
-                    numBytesSendCounter.inc(outgoingBytesSinceLastUpdate);
+                    numBytesOutCounter.inc(outgoingBytesSinceLastUpdate);
                     latestOutgoingByteTotal = outgoingBytesUntilNow;
                     lastSync = time;
                     registerMetricSync();
                 });
+    }
+
+    /**
+     * This method should only be invoked in the mailbox thread since the counter is not volatile.
+     * Logic needs to be invoked by write AND flush since we support various semantics.
+     */
+    private void checkAsyncException() throws IOException {
+        // reset this exception since we could close the writer later on
+        Exception e = asyncProducerException;
+        if (e != null) {
+
+            asyncProducerException = null;
+            numRecordsOutErrorsCounter.inc();
+            throw new IOException(
+                    "One or more Kafka Producer send requests have encountered exception", e);
+        }
     }
 
     private class WriterCallback implements Callback {
@@ -411,12 +435,22 @@ class KafkaWriter<IN>
             if (exception != null) {
                 FlinkKafkaInternalProducer<byte[], byte[]> producer =
                         KafkaWriter.this.currentProducer;
-                mailboxExecutor.execute(
+
+                // Propagate the first exception since amount of exceptions could be large. Need to
+                // do this in Producer IO thread since flush() guarantees that the future will
+                // complete. The same guarantee does not hold for tasks executed in separate
+                // executor e.g. mailbox executor. flush() needs to have the exception immediately
+                // available to fail the checkpoint.
+                if (asyncProducerException == null) {
+                    asyncProducerException = decorateException(metadata, exception, producer);
+                }
+
+                mailboxExecutor.submit(
                         () -> {
-                            numRecordsOutErrorsCounter.inc();
-                            throwException(metadata, exception, producer);
+                            // Checking for exceptions from previous writes
+                            checkAsyncException();
                         },
-                        "Failed to send data to Kafka");
+                        "Update error metric");
             }
 
             if (metadataConsumer != null) {
@@ -424,7 +458,7 @@ class KafkaWriter<IN>
             }
         }
 
-        private void throwException(
+        private FlinkRuntimeException decorateException(
                 RecordMetadata metadata,
                 Exception exception,
                 FlinkKafkaInternalProducer<byte[], byte[]> producer) {
@@ -433,7 +467,7 @@ class KafkaWriter<IN>
             if (exception instanceof UnknownProducerIdException) {
                 message += KafkaCommitter.UNKNOWN_PRODUCER_ID_ERROR_MESSAGE;
             }
-            throw new FlinkRuntimeException(message, exception);
+            return new FlinkRuntimeException(message, exception);
         }
     }
 }

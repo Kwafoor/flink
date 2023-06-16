@@ -56,13 +56,15 @@ public class SingleInputGateBenchmarkFactory extends SingleInputGateFactory {
                 connectionManager,
                 partitionManager,
                 taskEventPublisher,
-                networkBufferPool);
+                networkBufferPool,
+                null);
     }
 
     @Override
     protected InputChannel createKnownInputChannel(
             SingleInputGate inputGate,
             int index,
+            int buffersPerChannel,
             NettyShuffleDescriptor inputChannelDescriptor,
             int consumedSubpartitionIndex,
             SingleInputGateFactory.ChannelStatistics channelStatistics,
@@ -89,7 +91,7 @@ public class SingleInputGateBenchmarkFactory extends SingleInputGateFactory {
                     connectionManager,
                     partitionRequestInitialBackoff,
                     partitionRequestMaxBackoff,
-                    networkBuffersPerChannel,
+                    configuredNetworkBuffersPerChannel,
                     metrics);
         }
     }

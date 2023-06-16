@@ -21,6 +21,7 @@ package org.apache.flink.table.planner.plan.nodes.exec.stream;
 import org.apache.flink.FlinkVersion;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.dag.Transformation;
+import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.streaming.api.operators.KeyedProcessOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.api.transformations.OneInputTransformation;
@@ -36,6 +37,7 @@ import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeContext;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeMetadata;
 import org.apache.flink.table.planner.plan.nodes.exec.InputProperty;
 import org.apache.flink.table.planner.plan.nodes.exec.SingleTransformationTranslator;
+import org.apache.flink.table.planner.plan.nodes.exec.StateMetadata;
 import org.apache.flink.table.planner.plan.nodes.exec.utils.ExecNodeUtil;
 import org.apache.flink.table.planner.plan.utils.AggregateUtil;
 import org.apache.flink.table.planner.plan.utils.KeySelectorUtil;
@@ -49,7 +51,10 @@ import org.apache.flink.table.runtime.typeutils.InternalTypeInfo;
 import org.apache.flink.table.types.logical.RowType;
 
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonCreator;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonInclude;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonProperty;
+
+import javax.annotation.Nullable;
 
 import java.util.Collections;
 import java.util.List;
@@ -64,12 +69,21 @@ import java.util.List;
         name = "stream-exec-changelog-normalize",
         version = 1,
         consumedOptions = {
-            "table.exec.state.ttl",
             "table.exec.mini-batch.enabled",
             "table.exec.mini-batch.size",
         },
         producedTransformations = StreamExecChangelogNormalize.CHANGELOG_NORMALIZE_TRANSFORMATION,
         minPlanVersion = FlinkVersion.v1_15,
+        minStateVersion = FlinkVersion.v1_15)
+@ExecNodeMetadata(
+        name = "stream-exec-changelog-normalize",
+        version = 2,
+        consumedOptions = {
+            "table.exec.mini-batch.enabled",
+            "table.exec.mini-batch.size",
+        },
+        producedTransformations = StreamExecChangelogNormalize.CHANGELOG_NORMALIZE_TRANSFORMATION,
+        minPlanVersion = FlinkVersion.v1_18,
         minStateVersion = FlinkVersion.v1_15)
 public class StreamExecChangelogNormalize extends ExecNodeBase<RowData>
         implements StreamExecNode<RowData>, SingleTransformationTranslator<RowData> {
@@ -78,6 +92,7 @@ public class StreamExecChangelogNormalize extends ExecNodeBase<RowData>
 
     public static final String FIELD_NAME_UNIQUE_KEYS = "uniqueKeys";
     public static final String FIELD_NAME_GENERATE_UPDATE_BEFORE = "generateUpdateBefore";
+    public static final String STATE_NAME = "changelogNormalizeState";
 
     @JsonProperty(FIELD_NAME_UNIQUE_KEYS)
     private final int[] uniqueKeys;
@@ -85,7 +100,13 @@ public class StreamExecChangelogNormalize extends ExecNodeBase<RowData>
     @JsonProperty(FIELD_NAME_GENERATE_UPDATE_BEFORE)
     private final boolean generateUpdateBefore;
 
+    @Nullable
+    @JsonProperty(FIELD_NAME_STATE)
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private final List<StateMetadata> stateMetadataList;
+
     public StreamExecChangelogNormalize(
+            ReadableConfig tableConfig,
             int[] uniqueKeys,
             boolean generateUpdateBefore,
             InputProperty inputProperty,
@@ -94,8 +115,10 @@ public class StreamExecChangelogNormalize extends ExecNodeBase<RowData>
         this(
                 ExecNodeContext.newNodeId(),
                 ExecNodeContext.newContext(StreamExecChangelogNormalize.class),
+                ExecNodeContext.newPersistedConfig(StreamExecChangelogNormalize.class, tableConfig),
                 uniqueKeys,
                 generateUpdateBefore,
+                StateMetadata.getOneInputOperatorDefaultMeta(tableConfig, STATE_NAME),
                 Collections.singletonList(inputProperty),
                 outputType,
                 description);
@@ -105,14 +128,17 @@ public class StreamExecChangelogNormalize extends ExecNodeBase<RowData>
     public StreamExecChangelogNormalize(
             @JsonProperty(FIELD_NAME_ID) Integer id,
             @JsonProperty(FIELD_NAME_TYPE) ExecNodeContext context,
+            @JsonProperty(FIELD_NAME_CONFIGURATION) ReadableConfig persistedConfig,
             @JsonProperty(FIELD_NAME_UNIQUE_KEYS) int[] uniqueKeys,
             @JsonProperty(FIELD_NAME_GENERATE_UPDATE_BEFORE) boolean generateUpdateBefore,
+            @Nullable @JsonProperty(FIELD_NAME_STATE) List<StateMetadata> stateMetadataList,
             @JsonProperty(FIELD_NAME_INPUT_PROPERTIES) List<InputProperty> inputProperties,
             @JsonProperty(FIELD_NAME_OUTPUT_TYPE) RowType outputType,
             @JsonProperty(FIELD_NAME_DESCRIPTION) String description) {
-        super(id, context, inputProperties, outputType, description);
+        super(id, context, persistedConfig, inputProperties, outputType, description);
         this.uniqueKeys = uniqueKeys;
         this.generateUpdateBefore = generateUpdateBefore;
+        this.stateMetadataList = stateMetadataList;
     }
 
     @SuppressWarnings("unchecked")
@@ -126,12 +152,15 @@ public class StreamExecChangelogNormalize extends ExecNodeBase<RowData>
                 (InternalTypeInfo<RowData>) inputTransform.getOutputType();
 
         final OneInputStreamOperator<RowData, RowData> operator;
-        final long stateIdleTime = config.getStateRetentionTime();
+
+        final long stateRetentionTime =
+                StateMetadata.getStateTtlForOneInputOperator(config, stateMetadataList);
         final boolean isMiniBatchEnabled =
                 config.get(ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_ENABLED);
 
         GeneratedRecordEqualiser generatedEqualiser =
-                new EqualiserCodeGenerator(rowTypeInfo.toRowType())
+                new EqualiserCodeGenerator(
+                                rowTypeInfo.toRowType(), planner.getFlinkContext().getClassLoader())
                         .generateRecordEqualiser("DeduplicateRowEqualiser");
 
         if (isMiniBatchEnabled) {
@@ -141,7 +170,7 @@ public class StreamExecChangelogNormalize extends ExecNodeBase<RowData>
                     new ProcTimeMiniBatchDeduplicateKeepLastRowFunction(
                             rowTypeInfo,
                             rowSerializer,
-                            stateIdleTime,
+                            stateRetentionTime,
                             generateUpdateBefore,
                             true, // generateInsert
                             false, // inputInsertOnly
@@ -152,7 +181,7 @@ public class StreamExecChangelogNormalize extends ExecNodeBase<RowData>
             ProcTimeDeduplicateKeepLastRowFunction processFunction =
                     new ProcTimeDeduplicateKeepLastRowFunction(
                             rowTypeInfo,
-                            stateIdleTime,
+                            stateRetentionTime,
                             generateUpdateBefore,
                             true, // generateInsert
                             false, // inputInsertOnly
@@ -166,10 +195,12 @@ public class StreamExecChangelogNormalize extends ExecNodeBase<RowData>
                         createTransformationMeta(CHANGELOG_NORMALIZE_TRANSFORMATION, config),
                         operator,
                         rowTypeInfo,
-                        inputTransform.getParallelism());
+                        inputTransform.getParallelism(),
+                        false);
 
         final RowDataKeySelector selector =
-                KeySelectorUtil.getRowDataSelector(uniqueKeys, rowTypeInfo);
+                KeySelectorUtil.getRowDataSelector(
+                        planner.getFlinkContext().getClassLoader(), uniqueKeys, rowTypeInfo);
         transform.setStateKeySelector(selector);
         transform.setStateKeyType(selector.getProducedType());
 

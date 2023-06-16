@@ -19,9 +19,9 @@
 package org.apache.flink.test.recovery;
 
 import org.apache.flink.api.common.JobID;
+import org.apache.flink.api.common.accumulators.ListAccumulator;
 import org.apache.flink.api.common.state.ListState;
 import org.apache.flink.api.common.state.ListStateDescriptor;
-import org.apache.flink.api.common.time.Deadline;
 import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.configuration.ClusterOptions;
 import org.apache.flink.configuration.Configuration;
@@ -68,11 +68,13 @@ import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
-import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Tests local recovery by restarting Flink processes. */
 @ExtendWith(TestLoggerExtension.class)
 class LocalRecoveryITCase {
+
+    private static final String ALLOCATION_FAILURES_ACCUMULATOR_NAME = "acc";
 
     @TempDir private File tmpDirectory;
 
@@ -105,14 +107,16 @@ class LocalRecoveryITCase {
 
             final long waitingTimeInSeconds = 45L;
             waitUntilCheckpointCompleted(
-                    configuration,
-                    clusterEntrypoint.getRestPort(),
-                    jobClient.getJobID(),
-                    Deadline.fromNow(Duration.ofSeconds(waitingTimeInSeconds)));
+                    configuration, clusterEntrypoint.getRestPort(), jobClient.getJobID());
 
             restartTaskManagerProcesses(taskManagerProcesses, parallelism - 1);
 
-            jobClient.getJobExecutionResult().get(waitingTimeInSeconds, TimeUnit.SECONDS);
+            List<String> allocFailures =
+                    jobClient
+                            .getJobExecutionResult()
+                            .get(waitingTimeInSeconds, TimeUnit.SECONDS)
+                            .getAccumulatorResult(ALLOCATION_FAILURES_ACCUMULATOR_NAME);
+            assertTrue(allocFailures.isEmpty(), allocFailures.toString());
 
             success = true;
         } finally {
@@ -219,8 +223,7 @@ class LocalRecoveryITCase {
     }
 
     private void waitUntilCheckpointCompleted(
-            Configuration configuration, int restPort, JobID jobId, Deadline deadline)
-            throws Exception {
+            Configuration configuration, int restPort, JobID jobId) throws Exception {
         final RestClient restClient = new RestClient(configuration, Executors.directExecutor());
         final JobMessageParameters messageParameters = new JobMessageParameters();
         messageParameters.jobPathParameter.resolve(jobId);
@@ -237,8 +240,7 @@ class LocalRecoveryITCase {
                                             EmptyRequestBody.getInstance())
                                     .join();
                     return checkpointingStatistics.getCounts().getNumberCompletedCheckpoints() > 0;
-                },
-                deadline);
+                });
     }
 
     private JobClient submitJob(
@@ -313,11 +315,17 @@ class LocalRecoveryITCase {
                                         new IllegalStateException(
                                                 "Could not find corresponding TaskNameAllocationID information."));
 
-                assertThat(myTaskNameAllocationId.getAllocationId())
-                        .withFailMessage(
-                                "The task was deployed to AllocationID(%s) but it should have been deployed to AllocationID(%s) for local recovery.",
-                                allocationId, myTaskNameAllocationId.getAllocationId())
-                        .isEqualTo(allocationId);
+                runtimeContext.addAccumulator(
+                        ALLOCATION_FAILURES_ACCUMULATOR_NAME, new ListAccumulator<String>());
+                if (!allocationId.equals(myTaskNameAllocationId.getAllocationId())) {
+                    runtimeContext
+                            .getAccumulator(ALLOCATION_FAILURES_ACCUMULATOR_NAME)
+                            .add(
+                                    String.format(
+                                            "The task was deployed to AllocationID(%s) but it should have been deployed to AllocationID(%s) for local recovery.",
+                                            allocationId,
+                                            myTaskNameAllocationId.getAllocationId()));
+                }
                 // terminate
                 running = false;
             }

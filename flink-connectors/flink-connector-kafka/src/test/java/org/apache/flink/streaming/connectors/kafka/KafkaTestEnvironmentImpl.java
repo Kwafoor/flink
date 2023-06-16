@@ -65,7 +65,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.stream.Collectors;
 
-import static org.junit.Assert.fail;
+import static org.assertj.core.api.Assertions.fail;
 
 /** An implementation of the KafkaServerProvider. */
 public class KafkaTestEnvironmentImpl extends KafkaTestEnvironment {
@@ -78,6 +78,7 @@ public class KafkaTestEnvironmentImpl extends KafkaTestEnvironment {
     private final Map<Integer, KafkaContainer> brokers = new HashMap<>();
     private final Set<Integer> pausedBroker = new HashSet<>();
     private @Nullable GenericContainer<?> zookeeper;
+    private @Nullable Network network;
     private String brokerConnectionString = "";
     private Properties standardProps;
     private FlinkKafkaProducer.Semantic producerSemantic = FlinkKafkaProducer.Semantic.EXACTLY_ONCE;
@@ -141,15 +142,11 @@ public class KafkaTestEnvironmentImpl extends KafkaTestEnvironment {
 
     private void tryDelete(AdminClient adminClient, String topic) throws Exception {
         try {
-            adminClient
-                    .deleteTopics(Collections.singleton(topic))
-                    .all()
-                    .get(REQUEST_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            adminClient.deleteTopics(Collections.singleton(topic)).all().get();
             CommonTestUtils.waitUtil(
                     () -> {
                         try {
-                            return adminClient.listTopics().listings()
-                                    .get(REQUEST_TIMEOUT_SECONDS, TimeUnit.SECONDS).stream()
+                            return adminClient.listTopics().listings().get().stream()
                                     .map(TopicListing::name)
                                     .noneMatch((name) -> name.equals(topic));
                         } catch (Exception e) {
@@ -163,11 +160,7 @@ public class KafkaTestEnvironmentImpl extends KafkaTestEnvironment {
             LOG.info(
                     "Did not receive delete topic response within {} seconds. Checking if it succeeded",
                     REQUEST_TIMEOUT_SECONDS);
-            if (adminClient
-                    .listTopics()
-                    .names()
-                    .get(REQUEST_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-                    .contains(topic)) {
+            if (adminClient.listTopics().names().get().contains(topic)) {
                 throw new Exception("Topic still exists after timeout", e);
             }
         }
@@ -187,7 +180,7 @@ public class KafkaTestEnvironmentImpl extends KafkaTestEnvironment {
                             topicDescriptions =
                                     adminClient
                                             .describeTopics(Collections.singleton(topic))
-                                            .all()
+                                            .allTopicNames()
                                             .get(REQUEST_TIMEOUT_SECONDS, TimeUnit.SECONDS);
                         } catch (Exception e) {
                             LOG.warn("Exception caught when describing Kafka topics", e);
@@ -338,7 +331,10 @@ public class KafkaTestEnvironmentImpl extends KafkaTestEnvironment {
     public int getLeaderToShutDown(String topic) throws Exception {
         try (final AdminClient client = AdminClient.create(getStandardProperties())) {
             TopicDescription result =
-                    client.describeTopics(Collections.singleton(topic)).all().get().get(topic);
+                    client.describeTopics(Collections.singleton(topic))
+                            .allTopicNames()
+                            .get()
+                            .get(topic);
             return result.partitions().get(0).leader().id();
         }
     }
@@ -355,6 +351,10 @@ public class KafkaTestEnvironmentImpl extends KafkaTestEnvironment {
 
         if (zookeeper != null) {
             zookeeper.stop();
+        }
+
+        if (network != null) {
+            network.close();
         }
     }
 
@@ -397,14 +397,14 @@ public class KafkaTestEnvironmentImpl extends KafkaTestEnvironment {
     }
 
     private void startKafkaContainerCluster(int numBrokers) {
-        Network network = Network.newNetwork();
         if (numBrokers > 1) {
+            network = Network.newNetwork();
             zookeeper = createZookeeperContainer(network);
             zookeeper.start();
             LOG.info("Zookeeper container started");
         }
         for (int brokerID = 0; brokerID < numBrokers; brokerID++) {
-            KafkaContainer broker = createKafkaContainer(network, brokerID, zookeeper);
+            KafkaContainer broker = createKafkaContainer(brokerID, zookeeper);
             brokers.put(brokerID, broker);
         }
         new ArrayList<>(brokers.values()).parallelStream().forEach(GenericContainer::start);
@@ -426,11 +426,10 @@ public class KafkaTestEnvironmentImpl extends KafkaTestEnvironment {
     }
 
     private KafkaContainer createKafkaContainer(
-            Network network, int brokerID, @Nullable GenericContainer<?> zookeeper) {
+            int brokerID, @Nullable GenericContainer<?> zookeeper) {
         String brokerName = String.format("Kafka-%d", brokerID);
         KafkaContainer broker =
                 KafkaUtil.createKafkaContainer(DockerImageVersions.KAFKA, LOG, brokerName)
-                        .withNetwork(network)
                         .withNetworkAliases(brokerName)
                         .withEnv("KAFKA_BROKER_ID", String.valueOf(brokerID))
                         .withEnv("KAFKA_MESSAGE_MAX_BYTES", String.valueOf(50 * 1024 * 1024))
@@ -447,6 +446,7 @@ public class KafkaTestEnvironmentImpl extends KafkaTestEnvironment {
 
         if (zookeeper != null) {
             broker.dependsOn(zookeeper)
+                    .withNetwork(zookeeper.getNetwork())
                     .withExternalZookeeper(
                             String.format("%s:%d", ZOOKEEPER_HOSTNAME, ZOOKEEPER_PORT));
         } else {

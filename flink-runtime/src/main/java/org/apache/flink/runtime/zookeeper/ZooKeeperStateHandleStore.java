@@ -391,7 +391,6 @@ public class ZooKeeperStateHandleStore<T extends Serializable>
         final String rootPath = "/";
         boolean success = false;
 
-        retry:
         while (!success) {
             stateHandles.clear();
 
@@ -411,8 +410,13 @@ public class ZooKeeperStateHandleStore<T extends Serializable>
                         final RetrievableStateHandle<T> stateHandle = getAndLock(path);
                         stateHandles.add(new Tuple2<>(stateHandle, path));
                     } catch (NotExistException ignored) {
-                        // Concurrent deletion, retry
-                        continue retry;
+                        // The node is subject for deletion which can mean two things:
+                        // 1. The state is marked for deletion: The cVersion of the node does not
+                        // necessarily change. We're not interested in the state anymore, anyway.
+                        // Therefore, this error can be ignored.
+                        // 2. An actual concurrent deletion is going on. The child node is gone.
+                        // That would affect the cVersion of the parent node and, as a consequence,
+                        // would trigger a restart the logic through the while loop.
                     } catch (IOException ioException) {
                         LOG.warn(
                                 "Could not get all ZooKeeper children. Node {} contained "
@@ -473,32 +477,6 @@ public class ZooKeeperStateHandleStore<T extends Serializable>
         deleteIfExists(path);
 
         return true;
-    }
-
-    /**
-     * Releases all lock nodes of this ZooKeeperStateHandleStores and tries to remove all state
-     * nodes which are not locked anymore.
-     *
-     * @throws Exception if the delete operation fails
-     */
-    @Override
-    public void releaseAndTryRemoveAll() throws Exception {
-        Collection<String> children = getAllHandles();
-
-        Exception exception = null;
-
-        for (String child : children) {
-            try {
-                releaseAndTryRemove('/' + child);
-            } catch (Exception e) {
-                exception = ExceptionUtils.firstOrSuppressed(e, exception);
-            }
-        }
-
-        if (exception != null) {
-            throw new Exception(
-                    "Could not properly release and try removing all state nodes.", exception);
-        }
     }
 
     /**

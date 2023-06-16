@@ -18,7 +18,6 @@
 
 package org.apache.flink.runtime.resourcemanager;
 
-import org.apache.flink.api.common.time.Time;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.clusterframework.ApplicationStatus;
 import org.apache.flink.runtime.clusterframework.types.ResourceID;
@@ -26,23 +25,34 @@ import org.apache.flink.runtime.entrypoint.ClusterInformation;
 import org.apache.flink.runtime.heartbeat.HeartbeatServices;
 import org.apache.flink.runtime.heartbeat.TestingHeartbeatServices;
 import org.apache.flink.runtime.highavailability.TestingHighAvailabilityServices;
-import org.apache.flink.runtime.leaderelection.TestingLeaderElectionService;
+import org.apache.flink.runtime.leaderelection.LeaderInformation;
+import org.apache.flink.runtime.leaderelection.TestingLeaderElection;
+import org.apache.flink.runtime.metrics.MetricNames;
 import org.apache.flink.runtime.metrics.MetricRegistry;
 import org.apache.flink.runtime.metrics.util.TestingMetricRegistry;
 import org.apache.flink.runtime.rpc.RpcUtils;
 import org.apache.flink.runtime.rpc.TestingRpcService;
+import org.apache.flink.runtime.security.token.DelegationTokenManager;
+import org.apache.flink.runtime.security.token.NoOpDelegationTokenManager;
 import org.apache.flink.runtime.util.TestingFatalErrorHandler;
 import org.apache.flink.util.TestLogger;
 
+import org.assertj.core.util.Sets;
 import org.junit.After;
 import org.junit.AfterClass;
+import org.junit.Assert;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 import static org.hamcrest.Matchers.is;
@@ -54,10 +64,9 @@ import static org.junit.Assert.fail;
 /** Tests for {@link ResourceManagerServiceImpl}. */
 public class ResourceManagerServiceImplTest extends TestLogger {
 
-    private static final Time TIMEOUT = Time.seconds(10L);
-    private static final Time FAST_TIMEOUT = Time.milliseconds(50L);
-
     private static final HeartbeatServices heartbeatServices = new TestingHeartbeatServices();
+    private static final DelegationTokenManager delegationTokenManager =
+            new NoOpDelegationTokenManager();
     private static final ClusterInformation clusterInformation =
             new ClusterInformation("localhost", 1234);
     private static final MetricRegistry metricRegistry = TestingMetricRegistry.builder().build();
@@ -67,7 +76,8 @@ public class ResourceManagerServiceImplTest extends TestLogger {
     private static TestingFatalErrorHandler fatalErrorHandler;
 
     private TestingResourceManagerFactory.Builder rmFactoryBuilder;
-    private TestingLeaderElectionService leaderElectionService;
+    private TestingLeaderElection leaderElection;
+
     private ResourceManagerServiceImpl resourceManagerService;
 
     @BeforeClass
@@ -84,18 +94,16 @@ public class ResourceManagerServiceImplTest extends TestLogger {
 
         rmFactoryBuilder = new TestingResourceManagerFactory.Builder();
 
-        leaderElectionService = new TestingLeaderElectionService();
-        haService.setResourceManagerLeaderElectionService(leaderElectionService);
+        leaderElection = new TestingLeaderElection();
+        haService.setResourceManagerLeaderElection(leaderElection);
     }
 
     @After
     public void teardown() throws Exception {
+        leaderElection.close();
+
         if (resourceManagerService != null) {
             resourceManagerService.close();
-        }
-
-        if (leaderElectionService != null) {
-            leaderElectionService.stop();
         }
 
         if (fatalErrorHandler.hasExceptionOccurred()) {
@@ -106,7 +114,7 @@ public class ResourceManagerServiceImplTest extends TestLogger {
     @AfterClass
     public static void teardownClass() throws Exception {
         if (rpcService != null) {
-            RpcUtils.terminateRpcService(rpcService, TIMEOUT);
+            RpcUtils.terminateRpcService(rpcService);
         }
     }
 
@@ -125,6 +133,7 @@ public class ResourceManagerServiceImplTest extends TestLogger {
                         rpcService,
                         haService,
                         heartbeatServices,
+                        delegationTokenManager,
                         fatalErrorHandler,
                         clusterInformation,
                         null,
@@ -143,16 +152,12 @@ public class ResourceManagerServiceImplTest extends TestLogger {
         createAndStartResourceManager();
 
         // grant leadership
-        leaderElectionService.isLeader(leaderSessionId);
+        final CompletableFuture<LeaderInformation> confirmedLeaderInformation =
+                leaderElection.isLeader(leaderSessionId);
 
         // should start new RM and confirm leader session
-        assertThat(startRmFuture.get(TIMEOUT.getSize(), TIMEOUT.getUnit()), is(leaderSessionId));
-        assertThat(
-                leaderElectionService
-                        .getConfirmationFuture()
-                        .get(TIMEOUT.getSize(), TIMEOUT.getUnit())
-                        .getLeaderSessionId(),
-                is(leaderSessionId));
+        assertThat(startRmFuture.get(), is(leaderSessionId));
+        assertThat(confirmedLeaderInformation.get().getLeaderSessionID(), is(leaderSessionId));
     }
 
     @Test
@@ -166,21 +171,17 @@ public class ResourceManagerServiceImplTest extends TestLogger {
         createAndStartResourceManager();
 
         // grant leadership
-        leaderElectionService.isLeader(leaderSessionId);
+        final CompletableFuture<LeaderInformation> confirmedLeaderInformation =
+                leaderElection.isLeader(leaderSessionId);
 
         // RM initialization not finished, should not confirm leader session
-        assertNotComplete(leaderElectionService.getConfirmationFuture());
+        assertNotComplete(confirmedLeaderInformation);
 
         // finish RM initialization
         finishRmInitializationFuture.complete(null);
 
         // should confirm leader session
-        assertThat(
-                leaderElectionService
-                        .getConfirmationFuture()
-                        .get(TIMEOUT.getSize(), TIMEOUT.getUnit())
-                        .getLeaderSessionId(),
-                is(leaderSessionId));
+        assertThat(confirmedLeaderInformation.get().getLeaderSessionID(), is(leaderSessionId));
     }
 
     @Test
@@ -205,24 +206,16 @@ public class ResourceManagerServiceImplTest extends TestLogger {
         createAndStartResourceManager();
 
         // first time grant leadership
-        leaderElectionService.isLeader(leaderSessionId1);
-
-        // make sure RM started, before proceeding the next step
-        assertRmStarted();
+        leaderElection.isLeader(leaderSessionId1).join();
 
         // second time grant leadership
-        leaderElectionService.isLeader(leaderSessionId2);
+        final CompletableFuture<LeaderInformation> confirmedLeaderInformation =
+                leaderElection.isLeader(leaderSessionId2);
 
         // should terminate first RM, start a new RM and confirm leader session
-        assertThat(
-                terminateRmFuture.get(TIMEOUT.getSize(), TIMEOUT.getUnit()), is(leaderSessionId1));
-        assertThat(startRmFuture2.get(TIMEOUT.getSize(), TIMEOUT.getUnit()), is(leaderSessionId2));
-        assertThat(
-                leaderElectionService
-                        .getConfirmationFuture()
-                        .get(TIMEOUT.getSize(), TIMEOUT.getUnit())
-                        .getLeaderSessionId(),
-                is(leaderSessionId2));
+        assertThat(terminateRmFuture.get(), is(leaderSessionId1));
+        assertThat(startRmFuture2.get(), is(leaderSessionId2));
+        assertThat(confirmedLeaderInformation.get().getLeaderSessionID(), is(leaderSessionId2));
     }
 
     @Test
@@ -248,13 +241,11 @@ public class ResourceManagerServiceImplTest extends TestLogger {
         createAndStartResourceManager();
 
         // first time grant leadership
-        leaderElectionService.isLeader(leaderSessionId1);
-
-        // make sure RM started, before proceeding the next step
-        assertRmStarted();
+        leaderElection.isLeader(leaderSessionId1).join();
 
         // second time grant leadership
-        leaderElectionService.isLeader(leaderSessionId2);
+        final CompletableFuture<LeaderInformation> confirmedLeaderInformation =
+                leaderElection.isLeader(leaderSessionId2);
 
         // first RM termination not finished, should not start new RM
         assertNotComplete(startRmFuture2);
@@ -263,13 +254,8 @@ public class ResourceManagerServiceImplTest extends TestLogger {
         finishRmTerminationFuture.complete(null);
 
         // should start new RM and confirm leader session
-        assertThat(startRmFuture2.get(TIMEOUT.getSize(), TIMEOUT.getUnit()), is(leaderSessionId2));
-        assertThat(
-                leaderElectionService
-                        .getConfirmationFuture()
-                        .get(TIMEOUT.getSize(), TIMEOUT.getUnit())
-                        .getLeaderSessionId(),
-                is(leaderSessionId2));
+        assertThat(startRmFuture2.get(), is(leaderSessionId2));
+        assertThat(confirmedLeaderInformation.get().getLeaderSessionID(), is(leaderSessionId2));
     }
 
     @Test
@@ -281,11 +267,12 @@ public class ResourceManagerServiceImplTest extends TestLogger {
         createResourceManager();
 
         // grant leadership
-        leaderElectionService.isLeader(UUID.randomUUID());
+        final CompletableFuture<LeaderInformation> confirmedLeaderInformation =
+                leaderElection.isLeader(UUID.randomUUID());
 
         // service not started, should not start new RM
         assertNotComplete(startRmFuture);
-        assertNotComplete(leaderElectionService.getConfirmationFuture());
+        assertNotComplete(confirmedLeaderInformation);
     }
 
     @Test
@@ -298,11 +285,12 @@ public class ResourceManagerServiceImplTest extends TestLogger {
         resourceManagerService.close();
 
         // grant leadership
-        leaderElectionService.isLeader(UUID.randomUUID());
+        final CompletableFuture<LeaderInformation> confirmedLeaderInformation =
+                leaderElection.isLeader(UUID.randomUUID());
 
         // service stopped, should not start new RM
         assertNotComplete(startRmFuture);
-        assertNotComplete(leaderElectionService.getConfirmationFuture());
+        assertNotComplete(confirmedLeaderInformation);
     }
 
     @Test
@@ -315,17 +303,13 @@ public class ResourceManagerServiceImplTest extends TestLogger {
         createAndStartResourceManager();
 
         // grant leadership
-        leaderElectionService.isLeader(leaderSessionId);
-
-        // make sure RM started, before proceeding the next step
-        assertRmStarted();
+        leaderElection.isLeader(leaderSessionId).join();
 
         // revoke leadership
-        leaderElectionService.notLeader();
+        leaderElection.notLeader();
 
         // should terminate RM
-        assertThat(
-                terminateRmFuture.get(TIMEOUT.getSize(), TIMEOUT.getUnit()), is(leaderSessionId));
+        assertThat(terminateRmFuture.get(), is(leaderSessionId));
     }
 
     @Test
@@ -336,16 +320,13 @@ public class ResourceManagerServiceImplTest extends TestLogger {
         createAndStartResourceManager();
 
         // grant leadership
-        leaderElectionService.isLeader(UUID.randomUUID());
-
-        // make sure RM started, before proceeding the next step
-        assertRmStarted();
+        leaderElection.isLeader(UUID.randomUUID()).join();
 
         // revoke leadership
-        leaderElectionService.notLeader();
+        leaderElection.notLeader();
 
         // should terminate service
-        resourceManagerService.getTerminationFuture().get(TIMEOUT.getSize(), TIMEOUT.getUnit());
+        resourceManagerService.getTerminationFuture().get();
     }
 
     @Test
@@ -358,16 +339,13 @@ public class ResourceManagerServiceImplTest extends TestLogger {
         createAndStartResourceManager();
 
         // grant leadership
-        leaderElectionService.isLeader(leaderSessionId);
-
-        // make sure RM started, before proceeding the next step
-        assertRmStarted();
+        leaderElection.isLeader(leaderSessionId).join();
 
         // terminate RM
         rmTerminationFuture.complete(null);
 
         // should terminate service
-        resourceManagerService.getTerminationFuture().get(TIMEOUT.getSize(), TIMEOUT.getUnit());
+        resourceManagerService.getTerminationFuture().get();
     }
 
     @Test
@@ -383,15 +361,11 @@ public class ResourceManagerServiceImplTest extends TestLogger {
         createAndStartResourceManager();
 
         // grant leadership
-        leaderElectionService.isLeader(leaderSessionId);
-
-        // make sure RM started, before proceeding the next step
-        assertRmStarted();
+        leaderElection.isLeader(leaderSessionId).join();
 
         // revoke leadership
-        leaderElectionService.notLeader();
-        assertThat(
-                terminateRmFuture.get(TIMEOUT.getSize(), TIMEOUT.getUnit()), is(leaderSessionId));
+        leaderElection.notLeader();
+        assertThat(terminateRmFuture.get(), is(leaderSessionId));
 
         // terminate RM
         rmTerminationFuture.complete(null);
@@ -409,18 +383,16 @@ public class ResourceManagerServiceImplTest extends TestLogger {
         createAndStartResourceManager();
 
         // grant leadership
-        leaderElectionService.isLeader(UUID.randomUUID());
+        leaderElection.isLeader(UUID.randomUUID()).join();
 
-        // make sure RM started, before proceeding the next step
-        assertRmStarted();
-        assertFalse(leaderElectionService.isStopped());
+        assertFalse(leaderElection.isStopped());
 
         // close service
         resourceManagerService.close();
 
         // should stop RM and leader election
         assertTrue(terminateRmFuture.isDone());
-        assertTrue(leaderElectionService.isStopped());
+        assertTrue(leaderElection.isStopped());
     }
 
     @Test
@@ -432,10 +404,7 @@ public class ResourceManagerServiceImplTest extends TestLogger {
         createAndStartResourceManager();
 
         // grant leadership
-        leaderElectionService.isLeader(UUID.randomUUID());
-
-        // make sure RM started, before proceeding the next step
-        assertRmStarted();
+        leaderElection.isLeader(UUID.randomUUID()).join();
 
         // close service
         final CompletableFuture<Void> closeServiceFuture = resourceManagerService.closeAsync();
@@ -446,7 +415,7 @@ public class ResourceManagerServiceImplTest extends TestLogger {
         // finish RM termination
         finishRmTerminationFuture.complete(null);
 
-        closeServiceFuture.get(TIMEOUT.getSize(), TIMEOUT.getUnit());
+        closeServiceFuture.get();
     }
 
     @Test
@@ -463,10 +432,10 @@ public class ResourceManagerServiceImplTest extends TestLogger {
         createAndStartResourceManager();
 
         // grant leadership
-        leaderElectionService.isLeader(UUID.randomUUID());
+        leaderElection.isLeader(UUID.randomUUID());
 
         // make sure leader RM is created
-        startRmInitializationFuture.get(TIMEOUT.getSize(), TIMEOUT.getUnit());
+        startRmInitializationFuture.get();
 
         // deregister application
         final CompletableFuture<Void> deregisterApplicationFuture =
@@ -479,7 +448,7 @@ public class ResourceManagerServiceImplTest extends TestLogger {
         finishRmInitializationFuture.complete(null);
 
         // should perform deregistration
-        deregisterApplicationFuture.get(TIMEOUT.getSize(), TIMEOUT.getUnit());
+        deregisterApplicationFuture.get();
     }
 
     @Test
@@ -489,7 +458,61 @@ public class ResourceManagerServiceImplTest extends TestLogger {
                 resourceManagerService.deregisterApplication(ApplicationStatus.CANCELED, null);
 
         // should not report error
-        deregisterApplicationFuture.get(TIMEOUT.getSize(), TIMEOUT.getUnit());
+        deregisterApplicationFuture.get();
+    }
+
+    @Test
+    public void grantAndRevokeLeadership_verifyMetrics() throws Exception {
+        final Set<String> registeredMetrics = Collections.newSetFromMap(new ConcurrentHashMap<>());
+        TestingMetricRegistry metricRegistry =
+                TestingMetricRegistry.builder()
+                        .setRegisterConsumer((a, b, c) -> registeredMetrics.add(b))
+                        .setUnregisterConsumer((a, b, c) -> registeredMetrics.remove(b))
+                        .build();
+
+        final TestingResourceManagerFactory rmFactory = rmFactoryBuilder.build();
+        resourceManagerService =
+                ResourceManagerServiceImpl.create(
+                        rmFactory,
+                        new Configuration(),
+                        ResourceID.generate(),
+                        rpcService,
+                        haService,
+                        heartbeatServices,
+                        delegationTokenManager,
+                        fatalErrorHandler,
+                        clusterInformation,
+                        null,
+                        metricRegistry,
+                        "localhost",
+                        ForkJoinPool.commonPool());
+        resourceManagerService.start();
+
+        Assert.assertEquals(0, registeredMetrics.size());
+        // grant leadership
+        leaderElection.isLeader(UUID.randomUUID()).join();
+
+        Set<String> expectedMetrics =
+                Sets.set(
+                        MetricNames.NUM_REGISTERED_TASK_MANAGERS,
+                        MetricNames.TASK_SLOTS_TOTAL,
+                        MetricNames.TASK_SLOTS_AVAILABLE);
+        Assert.assertTrue(
+                "Expected RM to register leader metrics",
+                registeredMetrics.containsAll(expectedMetrics));
+
+        // revoke leadership, block until old rm is terminated
+        revokeLeadership();
+
+        Set<String> intersection = new HashSet<>(registeredMetrics);
+        intersection.retainAll(expectedMetrics);
+        Assert.assertTrue("Expected RM to unregister leader metrics", intersection.isEmpty());
+
+        leaderElection.isLeader(UUID.randomUUID()).join();
+
+        Assert.assertTrue(
+                "Expected RM to re-register leader metrics",
+                registeredMetrics.containsAll(expectedMetrics));
     }
 
     private static void blockOnFuture(CompletableFuture<?> future) {
@@ -503,14 +526,17 @@ public class ResourceManagerServiceImplTest extends TestLogger {
 
     private static void assertNotComplete(CompletableFuture<?> future) throws Exception {
         try {
-            future.get(FAST_TIMEOUT.getSize(), FAST_TIMEOUT.getUnit());
+            future.get(50, TimeUnit.MILLISECONDS);
             fail();
         } catch (TimeoutException e) {
             // expected
         }
     }
 
-    private void assertRmStarted() throws Exception {
-        leaderElectionService.getConfirmationFuture().get(TIMEOUT.getSize(), TIMEOUT.getUnit());
+    private void revokeLeadership() {
+        ResourceManager<?> leaderResourceManager =
+                resourceManagerService.getLeaderResourceManager();
+        leaderElection.notLeader();
+        blockOnFuture(leaderResourceManager.getTerminationFuture());
     }
 }

@@ -19,6 +19,7 @@
 package org.apache.flink.table.planner.plan.nodes.exec.batch;
 
 import org.apache.flink.api.dag.Transformation;
+import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.streaming.api.operators.SimpleOperatorFactory;
 import org.apache.flink.table.api.TableException;
 import org.apache.flink.table.data.RowData;
@@ -53,6 +54,7 @@ public class BatchExecSortLimit extends ExecNodeBase<RowData>
     private final boolean isGlobal;
 
     public BatchExecSortLimit(
+            ReadableConfig tableConfig,
             SortSpec sortSpec,
             long limitStart,
             long limitEnd,
@@ -63,6 +65,7 @@ public class BatchExecSortLimit extends ExecNodeBase<RowData>
         super(
                 ExecNodeContext.newNodeId(),
                 ExecNodeContext.newContext(BatchExecSortLimit.class),
+                ExecNodeContext.newPersistedConfig(BatchExecSortLimit.class, tableConfig),
                 Collections.singletonList(inputProperty),
                 outputType,
                 description);
@@ -88,7 +91,11 @@ public class BatchExecSortLimit extends ExecNodeBase<RowData>
         // generate comparator
         GeneratedRecordComparator genComparator =
                 ComparatorCodeGenerator.gen(
-                        config.getTableConfig(), "SortLimitComparator", inputType, sortSpec);
+                        config,
+                        planner.getFlinkContext().getClassLoader(),
+                        "SortLimitComparator",
+                        inputType,
+                        sortSpec);
 
         // TODO If input is ordered, there is no need to use the heap.
         SortLimitOperator operator =
@@ -100,6 +107,7 @@ public class BatchExecSortLimit extends ExecNodeBase<RowData>
                 createTransformationDescription(config),
                 SimpleOperatorFactory.of(operator),
                 InternalTypeInfo.of(inputType),
-                inputTransform.getParallelism());
+                inputTransform.getParallelism(),
+                false);
     }
 }

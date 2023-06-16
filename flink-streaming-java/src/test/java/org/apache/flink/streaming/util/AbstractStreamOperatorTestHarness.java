@@ -76,6 +76,7 @@ import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.streaming.runtime.tasks.OperatorEventDispatcherImpl;
 import org.apache.flink.streaming.runtime.tasks.ProcessingTimeService;
 import org.apache.flink.streaming.runtime.tasks.StreamTask;
+import org.apache.flink.streaming.runtime.tasks.StreamTaskCancellationContext;
 import org.apache.flink.streaming.runtime.tasks.TestProcessingTimeService;
 import org.apache.flink.streaming.runtime.tasks.mailbox.TaskMailbox;
 import org.apache.flink.streaming.runtime.tasks.mailbox.TaskMailboxImpl;
@@ -149,7 +150,8 @@ public class AbstractStreamOperatorTestHarness<OUT> implements AutoCloseable {
                         ClassLoader userClassloader,
                         KeyContext keyContext,
                         ProcessingTimeService processingTimeService,
-                        Iterable<KeyGroupStatePartitionStreamProvider> rawKeyedStates)
+                        Iterable<KeyGroupStatePartitionStreamProvider> rawKeyedStates,
+                        StreamTaskCancellationContext cancellationContext)
                         throws Exception {
                     InternalTimeServiceManagerImpl<K> typedTimeServiceManager =
                             InternalTimeServiceManagerImpl.create(
@@ -157,7 +159,8 @@ public class AbstractStreamOperatorTestHarness<OUT> implements AutoCloseable {
                                     userClassloader,
                                     keyContext,
                                     processingTimeService,
-                                    rawKeyedStates);
+                                    rawKeyedStates,
+                                    cancellationContext);
                     timeServiceManager = typedTimeServiceManager;
                     return typedTimeServiceManager;
                 }
@@ -305,6 +308,13 @@ public class AbstractStreamOperatorTestHarness<OUT> implements AutoCloseable {
 
         this.taskMailbox = new TaskMailboxImpl();
 
+        // TODO remove this once we introduce AbstractStreamOperatorTestHarnessBuilder.
+        try {
+            this.checkpointStorageAccess = environment.getCheckpointStorageAccess();
+        } catch (NullPointerException | UnsupportedOperationException e) {
+            // cannot get checkpoint storage from environment, use default one.
+        }
+
         mockTask =
                 new MockStreamTaskBuilder(env)
                         .setCheckpointLock(checkpointLock)
@@ -324,7 +334,11 @@ public class AbstractStreamOperatorTestHarness<OUT> implements AutoCloseable {
             TtlTimeProvider ttlTimeProvider,
             InternalTimeServiceManager.Provider timeServiceManagerProvider) {
         return new StreamTaskStateInitializerImpl(
-                env, stateBackend, ttlTimeProvider, timeServiceManagerProvider);
+                env,
+                stateBackend,
+                ttlTimeProvider,
+                timeServiceManagerProvider,
+                StreamTaskCancellationContext.alwaysRunning());
     }
 
     public void setStateBackend(StateBackend stateBackend) {

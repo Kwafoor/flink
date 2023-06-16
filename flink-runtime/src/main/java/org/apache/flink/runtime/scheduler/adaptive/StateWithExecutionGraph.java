@@ -20,6 +20,7 @@ package org.apache.flink.runtime.scheduler.adaptive;
 
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.JobStatus;
+import org.apache.flink.core.execution.CheckpointType;
 import org.apache.flink.core.execution.SavepointFormatType;
 import org.apache.flink.queryablestate.KvStateID;
 import org.apache.flink.runtime.accumulators.AccumulatorSnapshot;
@@ -64,6 +65,7 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -165,10 +167,6 @@ abstract class StateWithExecutionGraph implements State {
     @Override
     public Logger getLogger() {
         return logger;
-    }
-
-    void notifyPartitionDataAvailable(ResultPartitionID partitionID) {
-        executionGraph.notifyPartitionDataAvailable(partitionID);
     }
 
     SerializedInputSplit requestNextInputSplit(
@@ -279,7 +277,7 @@ abstract class StateWithExecutionGraph implements State {
                         context.getMainThreadExecutor());
     }
 
-    CompletableFuture<String> triggerCheckpoint() {
+    CompletableFuture<CompletedCheckpoint> triggerCheckpoint(CheckpointType checkpointType) {
         final CheckpointCoordinator checkpointCoordinator =
                 executionGraph.getCheckpointCoordinator();
         final JobID jobID = executionGraph.getJobID();
@@ -290,8 +288,7 @@ abstract class StateWithExecutionGraph implements State {
         logger.info("Triggering a checkpoint for job {}.", jobID);
 
         return checkpointCoordinator
-                .triggerCheckpoint(false)
-                .thenApply(CompletedCheckpoint::getExternalPointer)
+                .triggerCheckpoint(checkpointType)
                 .handleAsync(
                         (path, throwable) -> {
                             if (throwable != null) {
@@ -336,8 +333,9 @@ abstract class StateWithExecutionGraph implements State {
     abstract void onGloballyTerminalState(JobStatus globallyTerminalState);
 
     @Override
-    public void handleGlobalFailure(Throwable cause) {
-        failureCollection.add(ExceptionHistoryEntry.createGlobal(cause));
+    public void handleGlobalFailure(
+            Throwable cause, CompletableFuture<Map<String, String>> failureLabels) {
+        failureCollection.add(ExceptionHistoryEntry.createGlobal(cause, failureLabels));
         onFailure(cause);
     }
 
@@ -346,9 +344,12 @@ abstract class StateWithExecutionGraph implements State {
      *
      * @param taskExecutionStateTransition taskExecutionStateTransition to update the ExecutionGraph
      *     with
+     * @param failureLabels the failure labels to attach to the task failure cause
      * @return {@code true} if the update was successful; otherwise {@code false}
      */
-    boolean updateTaskExecutionState(TaskExecutionStateTransition taskExecutionStateTransition) {
+    boolean updateTaskExecutionState(
+            TaskExecutionStateTransition taskExecutionStateTransition,
+            CompletableFuture<Map<String, String>> failureLabels) {
         // collect before updateState, as updateState may deregister the execution
         final Optional<AccessExecution> maybeExecution =
                 executionGraph.findExecution(taskExecutionStateTransition.getID());
@@ -363,7 +364,8 @@ abstract class StateWithExecutionGraph implements State {
             final String taskName = maybeTaskName.orElseThrow(NoSuchElementException::new);
             final ExecutionState currentState = execution.getState();
             if (currentState == desiredState) {
-                failureCollection.add(ExceptionHistoryEntry.create(execution, taskName));
+                failureCollection.add(
+                        ExceptionHistoryEntry.create(execution, taskName, failureLabels));
                 onFailure(
                         ErrorInfo.handleMissingThrowable(
                                 taskExecutionStateTransition.getError(userCodeClassLoader)));

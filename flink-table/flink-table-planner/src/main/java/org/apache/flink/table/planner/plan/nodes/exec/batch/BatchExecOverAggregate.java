@@ -19,18 +19,21 @@
 package org.apache.flink.table.planner.plan.nodes.exec.batch;
 
 import org.apache.flink.api.dag.Transformation;
+import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.streaming.api.operators.SimpleOperatorFactory;
 import org.apache.flink.table.api.TableException;
 import org.apache.flink.table.api.config.ExecutionConfigOptions;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.binary.BinaryRowData;
 import org.apache.flink.table.planner.calcite.FlinkRelBuilder;
+import org.apache.flink.table.planner.calcite.FlinkTypeFactory;
 import org.apache.flink.table.planner.codegen.CodeGeneratorContext;
 import org.apache.flink.table.planner.codegen.agg.AggsHandlerCodeGenerator;
 import org.apache.flink.table.planner.codegen.over.MultiFieldRangeBoundComparatorCodeGenerator;
 import org.apache.flink.table.planner.codegen.over.RangeBoundComparatorCodeGenerator;
 import org.apache.flink.table.planner.codegen.sort.ComparatorCodeGenerator;
 import org.apache.flink.table.planner.delegation.PlannerBase;
+import org.apache.flink.table.planner.functions.aggfunctions.SizeBasedWindowFunction;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecEdge;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNode;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNodeConfig;
@@ -68,6 +71,7 @@ import org.apache.calcite.rex.RexWindowBound;
 import org.apache.calcite.sql.SqlKind;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
@@ -75,6 +79,7 @@ import java.util.List;
 public class BatchExecOverAggregate extends BatchExecOverAggregateBase {
 
     public BatchExecOverAggregate(
+            ReadableConfig tableConfig,
             OverSpec overSpec,
             InputProperty inputProperty,
             RowType outputType,
@@ -82,6 +87,7 @@ public class BatchExecOverAggregate extends BatchExecOverAggregateBase {
         super(
                 ExecNodeContext.newNodeId(),
                 ExecNodeContext.newContext(BatchExecOverAggregate.class),
+                ExecNodeContext.newPersistedConfig(BatchExecOverAggregate.class, tableConfig),
                 overSpec,
                 inputProperty,
                 outputType,
@@ -103,7 +109,8 @@ public class BatchExecOverAggregate extends BatchExecOverAggregateBase {
         final int[] partitionFields = overSpec.getPartition().getFieldIndices();
         final GeneratedRecordComparator genComparator =
                 ComparatorCodeGenerator.gen(
-                        config.getTableConfig(),
+                        config,
+                        planner.getFlinkContext().getClassLoader(),
                         "SortComparator",
                         inputType,
                         SortUtil.getAscendingSortSpec(partitionFields));
@@ -130,14 +137,16 @@ public class BatchExecOverAggregate extends BatchExecOverAggregateBase {
                 GroupSpec group = overSpec.getGroups().get(i);
                 AggregateInfoList aggInfoList =
                         AggregateUtil.transformToBatchAggregateInfoList(
+                                planner.getTypeFactory(),
                                 inputTypeWithConstants,
                                 JavaScalaConversionUtil.toScala(group.getAggCalls()),
                                 null, // aggCallNeedRetractions
                                 sortSpec.getFieldIndices());
                 AggsHandlerCodeGenerator generator =
                         new AggsHandlerCodeGenerator(
-                                new CodeGeneratorContext(config.getTableConfig()),
-                                planner.getRelBuilder(),
+                                new CodeGeneratorContext(
+                                        config, planner.getFlinkContext().getClassLoader()),
+                                planner.createRelBuilder(),
                                 JavaScalaConversionUtil.toScala(inputType.getChildren()),
                                 false); // copyInputField
                 // over agg code gen must pass the constants
@@ -159,8 +168,10 @@ public class BatchExecOverAggregate extends BatchExecOverAggregateBase {
         } else {
             List<OverWindowFrame> windowFrames =
                     createOverWindowFrames(
-                            planner.getRelBuilder(),
+                            planner.getTypeFactory(),
+                            planner.createRelBuilder(),
                             config,
+                            planner.getFlinkContext().getClassLoader(),
                             inputType,
                             sortSpec,
                             inputTypeWithConstants);
@@ -181,12 +192,15 @@ public class BatchExecOverAggregate extends BatchExecOverAggregateBase {
                 SimpleOperatorFactory.of(operator),
                 InternalTypeInfo.of(getOutputType()),
                 inputTransform.getParallelism(),
-                managedMemory);
+                managedMemory,
+                false);
     }
 
     private List<OverWindowFrame> createOverWindowFrames(
+            FlinkTypeFactory typeFactory,
             FlinkRelBuilder relBuilder,
             ExecNodeConfig config,
+            ClassLoader classLoader,
             RowType inputType,
             SortSpec sortSpec,
             RowType inputTypeWithConstants) {
@@ -197,6 +211,7 @@ public class BatchExecOverAggregate extends BatchExecOverAggregateBase {
                 for (AggregateCall aggCall : group.getAggCalls()) {
                     AggregateInfoList aggInfoList =
                             AggregateUtil.transformToBatchAggregateInfoList(
+                                    typeFactory,
                                     inputTypeWithConstants,
                                     JavaScalaConversionUtil.toScala(
                                             Collections.singletonList(aggCall)),
@@ -207,7 +222,7 @@ public class BatchExecOverAggregate extends BatchExecOverAggregateBase {
 
                     AggsHandlerCodeGenerator generator =
                             new AggsHandlerCodeGenerator(
-                                    new CodeGeneratorContext(config.getTableConfig()),
+                                    new CodeGeneratorContext(config, classLoader),
                                     relBuilder,
                                     JavaScalaConversionUtil.toScala(inputType.getChildren()),
                                     false); // copyInputField
@@ -265,6 +280,7 @@ public class BatchExecOverAggregate extends BatchExecOverAggregateBase {
             } else {
                 AggregateInfoList aggInfoList =
                         AggregateUtil.transformToBatchAggregateInfoList(
+                                typeFactory,
                                 // use aggInputType which considers constants as input instead of
                                 // inputSchema.relDataType
                                 inputTypeWithConstants,
@@ -273,10 +289,14 @@ public class BatchExecOverAggregate extends BatchExecOverAggregateBase {
                                 sortSpec.getFieldIndices());
                 AggsHandlerCodeGenerator generator =
                         new AggsHandlerCodeGenerator(
-                                new CodeGeneratorContext(config.getTableConfig()),
+                                new CodeGeneratorContext(config, classLoader),
                                 relBuilder,
                                 JavaScalaConversionUtil.toScala(inputType.getChildren()),
                                 false); // copyInputField
+                if (Arrays.stream(aggInfoList.aggInfos())
+                        .anyMatch(f -> f.function() instanceof SizeBasedWindowFunction)) {
+                    generator.needWindowSize();
+                }
                 // over agg code gen must pass the constants
                 GeneratedAggsHandleFunction genAggsHandler =
                         generator
@@ -295,6 +315,7 @@ public class BatchExecOverAggregate extends BatchExecOverAggregateBase {
                                     createBoundComparator(
                                             relBuilder,
                                             config,
+                                            classLoader,
                                             sortSpec,
                                             group.getUpperBound(),
                                             false,
@@ -307,6 +328,7 @@ public class BatchExecOverAggregate extends BatchExecOverAggregateBase {
                                     createBoundComparator(
                                             relBuilder,
                                             config,
+                                            classLoader,
                                             sortSpec,
                                             group.getLowerBound(),
                                             true,
@@ -319,6 +341,7 @@ public class BatchExecOverAggregate extends BatchExecOverAggregateBase {
                                     createBoundComparator(
                                             relBuilder,
                                             config,
+                                            classLoader,
                                             sortSpec,
                                             group.getLowerBound(),
                                             true,
@@ -327,6 +350,7 @@ public class BatchExecOverAggregate extends BatchExecOverAggregateBase {
                                     createBoundComparator(
                                             relBuilder,
                                             config,
+                                            classLoader,
                                             sortSpec,
                                             group.getUpperBound(),
                                             false,
@@ -387,6 +411,7 @@ public class BatchExecOverAggregate extends BatchExecOverAggregateBase {
     private GeneratedRecordComparator createBoundComparator(
             FlinkRelBuilder relBuilder,
             ExecNodeConfig config,
+            ClassLoader classLoader,
             SortSpec sortSpec,
             RexWindowBound windowBound,
             boolean isLowerBound,
@@ -397,7 +422,8 @@ public class BatchExecOverAggregate extends BatchExecOverAggregateBase {
             int sortKey = sortSpec.getFieldIndices()[0];
             return new RangeBoundComparatorCodeGenerator(
                             relBuilder,
-                            config.getTableConfig(),
+                            config,
+                            classLoader,
                             inputType,
                             bound,
                             sortKey,
@@ -408,7 +434,7 @@ public class BatchExecOverAggregate extends BatchExecOverAggregateBase {
         } else {
             // if the bound is current row, then window support comparing based on multi fields.
             return new MultiFieldRangeBoundComparatorCodeGenerator(
-                            config.getTableConfig(), inputType, sortSpec, isLowerBound)
+                            config, classLoader, inputType, sortSpec, isLowerBound)
                     .generateBoundComparator("MultiFieldRangeBoundComparator");
         }
     }
@@ -417,17 +443,21 @@ public class BatchExecOverAggregate extends BatchExecOverAggregateBase {
         return overSpec.getGroups().stream()
                 .anyMatch(
                         group -> {
-                            OverWindowMode mode = inferGroupMode(group);
-                            switch (mode) {
-                                case INSENSITIVE:
-                                    return false;
-                                case ROW:
-                                    return (!group.getLowerBound().isCurrentRow()
-                                                    || !group.getUpperBound().isCurrentRow())
-                                            && (!group.getLowerBound().isUnbounded()
-                                                    || !group.getUpperBound().isCurrentRow());
-                                default:
-                                    return true;
+                            if (containSizeBasedWindowFunction(group)) {
+                                return true;
+                            } else {
+                                OverWindowMode mode = inferGroupMode(group);
+                                switch (mode) {
+                                    case INSENSITIVE:
+                                        return false;
+                                    case ROW:
+                                        return (!group.getLowerBound().isCurrentRow()
+                                                        || !group.getUpperBound().isCurrentRow())
+                                                && (!group.getLowerBound().isUnbounded()
+                                                        || !group.getUpperBound().isCurrentRow());
+                                    default:
+                                        return true;
+                                }
                             }
                         });
     }

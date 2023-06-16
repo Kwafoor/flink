@@ -21,6 +21,8 @@ package org.apache.flink.runtime.resourcemanager;
 import org.apache.flink.api.common.time.Time;
 import org.apache.flink.configuration.AkkaOptions;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.runtime.blocklist.BlocklistHandler;
+import org.apache.flink.runtime.blocklist.BlocklistUtils;
 import org.apache.flink.runtime.clusterframework.ApplicationStatus;
 import org.apache.flink.runtime.clusterframework.types.ResourceID;
 import org.apache.flink.runtime.entrypoint.ClusterInformation;
@@ -28,14 +30,18 @@ import org.apache.flink.runtime.heartbeat.HeartbeatServices;
 import org.apache.flink.runtime.io.network.partition.ResourceManagerPartitionTrackerFactory;
 import org.apache.flink.runtime.io.network.partition.ResourceManagerPartitionTrackerImpl;
 import org.apache.flink.runtime.metrics.groups.ResourceManagerMetricGroup;
+import org.apache.flink.runtime.resourcemanager.slotmanager.NonSupportedResourceAllocatorImpl;
+import org.apache.flink.runtime.resourcemanager.slotmanager.ResourceAllocator;
 import org.apache.flink.runtime.resourcemanager.slotmanager.SlotManager;
 import org.apache.flink.runtime.rpc.FatalErrorHandler;
 import org.apache.flink.runtime.rpc.RpcService;
+import org.apache.flink.runtime.security.token.DelegationTokenManager;
 import org.apache.flink.util.ConfigurationException;
 import org.apache.flink.util.function.TriConsumer;
 
 import javax.annotation.Nullable;
 
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
@@ -74,6 +80,7 @@ public class TestingResourceManagerFactory extends ResourceManagerFactory<Resour
             RpcService rpcService,
             UUID leaderSessionId,
             HeartbeatServices heartbeatServices,
+            DelegationTokenManager delegationTokenManager,
             FatalErrorHandler fatalErrorHandler,
             ClusterInformation clusterInformation,
             @Nullable String webInterfaceUrl,
@@ -86,8 +93,10 @@ public class TestingResourceManagerFactory extends ResourceManagerFactory<Resour
                 leaderSessionId,
                 resourceId,
                 heartbeatServices,
+                delegationTokenManager,
                 resourceManagerRuntimeServices.getSlotManager(),
                 ResourceManagerPartitionTrackerImpl::new,
+                BlocklistUtils.loadBlocklistHandlerFactory(configuration),
                 resourceManagerRuntimeServices.getJobLeaderIdService(),
                 clusterInformation,
                 fatalErrorHandler,
@@ -167,8 +176,10 @@ public class TestingResourceManagerFactory extends ResourceManagerFactory<Resour
                 UUID leaderSessionId,
                 ResourceID resourceId,
                 HeartbeatServices heartbeatServices,
+                DelegationTokenManager delegationTokenManager,
                 SlotManager slotManager,
                 ResourceManagerPartitionTrackerFactory clusterPartitionTrackerFactory,
+                BlocklistHandler.Factory blocklistHandlerFactory,
                 JobLeaderIdService jobLeaderIdService,
                 ClusterInformation clusterInformation,
                 FatalErrorHandler fatalErrorHandler,
@@ -180,8 +191,10 @@ public class TestingResourceManagerFactory extends ResourceManagerFactory<Resour
                     leaderSessionId,
                     resourceId,
                     heartbeatServices,
+                    delegationTokenManager,
                     slotManager,
                     clusterPartitionTrackerFactory,
+                    blocklistHandlerFactory,
                     jobLeaderIdService,
                     clusterInformation,
                     fatalErrorHandler,
@@ -209,17 +222,7 @@ public class TestingResourceManagerFactory extends ResourceManagerFactory<Resour
         }
 
         @Override
-        public boolean startNewWorker(WorkerResourceSpec workerResourceSpec) {
-            throw new UnsupportedOperationException();
-        }
-
-        @Override
-        protected ResourceID workerStarted(ResourceID resourceID) {
-            throw new UnsupportedOperationException();
-        }
-
-        @Override
-        public boolean stopWorker(ResourceID worker) {
+        protected Optional<ResourceID> getWorkerNodeIfAcceptRegistration(ResourceID resourceID) {
             throw new UnsupportedOperationException();
         }
 
@@ -227,6 +230,16 @@ public class TestingResourceManagerFactory extends ResourceManagerFactory<Resour
         public CompletableFuture<Void> getTerminationFuture() {
             return getTerminationFutureFunction.apply(
                     MockResourceManager.this, super.getTerminationFuture());
+        }
+
+        @Override
+        public CompletableFuture<Void> getReadyToServeFuture() {
+            return CompletableFuture.completedFuture(null);
+        }
+
+        @Override
+        protected ResourceAllocator getResourceAllocator() {
+            return NonSupportedResourceAllocatorImpl.INSTANCE;
         }
     }
 }

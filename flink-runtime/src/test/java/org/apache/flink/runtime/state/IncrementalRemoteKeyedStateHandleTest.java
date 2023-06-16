@@ -23,6 +23,7 @@ import org.apache.flink.runtime.checkpoint.metadata.CheckpointTestUtils;
 import org.junit.Assert;
 import org.junit.Test;
 
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.Random;
 import java.util.UUID;
@@ -32,9 +33,9 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
-import static org.powermock.api.mockito.PowerMockito.spy;
 
 public class IncrementalRemoteKeyedStateHandleTest {
 
@@ -244,7 +245,7 @@ public class IncrementalRemoteKeyedStateHandleTest {
 
     private static IncrementalRemoteKeyedStateHandle create(Random rnd) {
         return new IncrementalRemoteKeyedStateHandle(
-                UUID.nameUUIDFromBytes("test".getBytes()),
+                UUID.nameUUIDFromBytes("test".getBytes(StandardCharsets.UTF_8)),
                 KeyGroupRange.of(0, 0),
                 1L,
                 placeSpies(CheckpointTestUtils.createRandomStateHandleMap(rnd)),

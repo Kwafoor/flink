@@ -19,9 +19,11 @@
 package org.apache.flink.table.planner.utils;
 
 import org.apache.flink.FlinkVersion;
-import org.apache.flink.table.planner.plan.nodes.exec.serde.JsonSerdeUtil;
+import org.apache.flink.util.jackson.JacksonMapperFactory;
 
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.core.JsonProcessingException;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.JsonNode;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.io.IOException;
@@ -29,18 +31,55 @@ import java.io.IOException;
 /** This class contains a collection of generic utilities to deal with JSON in tests. */
 public final class JsonTestUtils {
 
+    private static final ObjectMapper OBJECT_MAPPER_INSTANCE =
+            JacksonMapperFactory.createObjectMapper();
+
     private JsonTestUtils() {}
 
     public static JsonNode readFromResource(String path) throws IOException {
-        return JsonSerdeUtil.getObjectMapper().readTree(JsonTestUtils.class.getResource(path));
+        return OBJECT_MAPPER_INSTANCE.readTree(JsonTestUtils.class.getResource(path));
+    }
+
+    public static JsonNode readFromString(String path) throws IOException {
+        return OBJECT_MAPPER_INSTANCE.readTree(path);
+    }
+
+    public static String writeToString(JsonNode target) throws JsonProcessingException {
+        return OBJECT_MAPPER_INSTANCE.writeValueAsString(target);
     }
 
     public static JsonNode setFlinkVersion(JsonNode target, FlinkVersion flinkVersion) {
         return ((ObjectNode) target)
-                .set("flinkVersion", JsonSerdeUtil.getObjectMapper().valueToTree(flinkVersion));
+                .set("flinkVersion", OBJECT_MAPPER_INSTANCE.valueToTree(flinkVersion.toString()));
     }
 
-    public static JsonNode clearFlinkVersion(JsonNode target) {
-        return ((ObjectNode) target).remove("flinkVersion");
+    public static JsonNode setExecNodeConfig(
+            JsonNode target, String type, String key, String value) {
+        target.get("nodes")
+                .elements()
+                .forEachRemaining(
+                        n -> {
+                            if (n.get("type").asText().equals(type)) {
+                                final ObjectNode configNode =
+                                        OBJECT_MAPPER_INSTANCE.createObjectNode();
+                                configNode.put(key, value);
+                                ((ObjectNode) n).set("configuration", configNode);
+                            }
+                        });
+        return target;
+    }
+
+    public static JsonNode setExecNodeStateMetadata(
+            JsonNode target, String type, int stateIndex, long stateTtl) {
+        target.get("nodes")
+                .elements()
+                .forEachRemaining(
+                        n -> {
+                            if (n.get("type").asText().startsWith(type) && n.hasNonNull("state")) {
+                                ((ObjectNode) (n.get("state").get(stateIndex)))
+                                        .put("ttl", stateTtl + " ms");
+                            }
+                        });
+        return target;
     }
 }

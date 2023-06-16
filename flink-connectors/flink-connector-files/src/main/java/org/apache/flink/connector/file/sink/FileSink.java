@@ -21,6 +21,7 @@ package org.apache.flink.connector.file.sink;
 import org.apache.flink.annotation.Experimental;
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.annotation.PublicEvolving;
+import org.apache.flink.api.common.SupportsConcurrentExecutionAttempts;
 import org.apache.flink.api.common.serialization.BulkWriter;
 import org.apache.flink.api.common.serialization.Encoder;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
@@ -117,6 +118,11 @@ import static org.apache.flink.util.Preconditions.checkState;
  * finished} state while any {@code in-progress} files are rolled back, so that they do not contain
  * data that arrived after the checkpoint from which we restore.
  *
+ * <p>FileSink also support compacting small files to accelerate the access speed of the resulted
+ * files. Compaction could be enabled via {@code enableCompact}. Once enabled, the compaction could
+ * only be disabled via calling {@code disableCompact} explicitly, otherwise there might be data
+ * loss.
+ *
  * @param <IN> Type of the elements in the input of the sink that are also the elements to be
  *     written to its output
  */
@@ -125,7 +131,8 @@ public class FileSink<IN>
         implements StatefulSink<IN, FileWriterBucketState>,
                 TwoPhaseCommittingSink<IN, FileSinkCommittable>,
                 WithCompatibleState,
-                WithPreCommitTopology<IN, FileSinkCommittable> {
+                WithPreCommitTopology<IN, FileSinkCommittable>,
+                SupportsConcurrentExecutionAttempts {
 
     private final BucketsBuilder<IN, ? extends BucketsBuilder<IN, ?>> bucketsBuilder;
 
@@ -135,11 +142,11 @@ public class FileSink<IN>
 
     @Override
     public FileWriter<IN> createWriter(InitContext context) throws IOException {
-        return bucketsBuilder.createWriter(context);
+        return restoreWriter(context, Collections.emptyList());
     }
 
     @Override
-    public StatefulSinkWriter<IN, FileWriterBucketState> restoreWriter(
+    public FileWriter<IN> restoreWriter(
             InitContext context, Collection<FileWriterBucketState> recoveredState)
             throws IOException {
         FileWriter<IN> writer = bucketsBuilder.createWriter(context);
@@ -197,36 +204,44 @@ public class FileSink<IN>
     public DataStream<CommittableMessage<FileSinkCommittable>> addPreCommitTopology(
             DataStream<CommittableMessage<FileSinkCommittable>> committableStream) {
         FileCompactStrategy strategy = bucketsBuilder.getCompactStrategy();
+        if (strategy == null && !bucketsBuilder.isCompactDisabledExplicitly()) {
+            // compact is never enabled, we may not add the handlers
+            return committableStream;
+        }
+
         if (strategy == null) {
-            // not enabled, handlers will be added to process the remaining states of the compact
-            // coordinator and the compactor operators.
+            // not enabled at present, handlers will be added to process the remaining states of the
+            // compact coordinator and the compactor operators.
             SingleOutputStreamOperator<
                             Either<CommittableMessage<FileSinkCommittable>, CompactorRequest>>
                     coordinatorOp =
                             committableStream
                                     .forward()
                                     .transform(
-                                            "CompactorCoordinator",
+                                            "CompactorCoordinatorPlaceHolder",
                                             new EitherTypeInfo<>(
                                                     committableStream.getType(),
                                                     new CompactorRequestTypeInfo(
                                                             bucketsBuilder
                                                                     ::getCommittableSerializer)),
                                             new CompactCoordinatorStateHandlerFactory(
-                                                    bucketsBuilder::getCommittableSerializer))
-                                    .setParallelism(committableStream.getParallelism())
-                                    .uid("FileSinkCompactorCoordinator");
+                                                    bucketsBuilder::getCommittableSerializer));
+            coordinatorOp
+                    .getTransformation()
+                    .setParallelism(committableStream.getParallelism(), false);
+            coordinatorOp.uid("FileSinkCompactorCoordinator");
 
-            return coordinatorOp
-                    .forward()
-                    .transform(
-                            "CompactorOperator",
-                            committableStream.getType(),
-                            new CompactorOperatorStateHandlerFactory(
-                                    bucketsBuilder::getCommittableSerializer,
-                                    bucketsBuilder::createBucketWriter))
-                    .setParallelism(committableStream.getParallelism())
-                    .uid("FileSinkCompactorOperator");
+            SingleOutputStreamOperator<CommittableMessage<FileSinkCommittable>> operator =
+                    coordinatorOp
+                            .forward()
+                            .transform(
+                                    "CompactorOperatorPlaceHolder",
+                                    committableStream.getType(),
+                                    new CompactorOperatorStateHandlerFactory(
+                                            bucketsBuilder::getCommittableSerializer,
+                                            bucketsBuilder::createBucketWriter));
+            operator.getTransformation().setParallelism(committableStream.getParallelism(), false);
+            return operator.uid("FileSinkCompactorOperator");
         }
 
         // explicitly rebalance here is required, or the partitioner will be forward, which is in
@@ -248,17 +263,17 @@ public class FileSink<IN>
         // distributed to different committers, which will cause a failure
         TypeInformation<CommittableMessage<FileSinkCommittable>> committableType =
                 committableStream.getType();
-        return coordinatorOp
-                .transform(
+        SingleOutputStreamOperator<CommittableMessage<FileSinkCommittable>> operator =
+                coordinatorOp.transform(
                         "CompactorOperator",
                         committableType,
                         new CompactorOperatorFactory(
                                 strategy,
                                 bucketsBuilder.getFileCompactor(),
                                 bucketsBuilder::getCommittableSerializer,
-                                bucketsBuilder::createBucketWriter))
-                .setParallelism(committableStream.getParallelism())
-                .uid("FileSinkCompactorOperator");
+                                bucketsBuilder::createBucketWriter));
+        operator.getTransformation().setParallelism(committableStream.getParallelism(), false);
+        return operator.uid("FileSinkCompactorOperator");
     }
 
     /** The base abstract class for the {@link RowFormatBuilder} and {@link BulkFormatBuilder}. */
@@ -290,6 +305,9 @@ public class FileSink<IN>
                 throws IOException;
 
         @Internal
+        abstract boolean isCompactDisabledExplicitly();
+
+        @Internal
         abstract FileCompactStrategy getCompactStrategy();
 
         @Internal
@@ -318,6 +336,8 @@ public class FileSink<IN>
         private RollingPolicy<IN, String> rollingPolicy;
 
         private OutputFileConfig outputFileConfig;
+
+        private boolean isCompactDisabledExplicitly = false;
 
         private FileCompactStrategy compactStrategy;
 
@@ -378,6 +398,11 @@ public class FileSink<IN>
             return self();
         }
 
+        public T disableCompact() {
+            this.isCompactDisabledExplicitly = true;
+            return self();
+        }
+
         /** Creates the actual sink. */
         public FileSink<IN> build() {
             return new FileSink<>(this);
@@ -413,6 +438,11 @@ public class FileSink<IN>
         @Override
         FileCommitter createCommitter() throws IOException {
             return new FileCommitter(createBucketWriter());
+        }
+
+        @Override
+        boolean isCompactDisabledExplicitly() {
+            return isCompactDisabledExplicitly;
         }
 
         @Override
@@ -482,6 +512,8 @@ public class FileSink<IN>
         private CheckpointRollingPolicy<IN, String> rollingPolicy;
 
         private OutputFileConfig outputFileConfig;
+
+        private boolean isCompactDisabledExplicitly = false;
 
         private FileCompactStrategy compactStrategy;
 
@@ -560,6 +592,11 @@ public class FileSink<IN>
             return self();
         }
 
+        public T disableCompact() {
+            this.isCompactDisabledExplicitly = true;
+            return self();
+        }
+
         /** Creates the actual sink. */
         public FileSink<IN> build() {
             return new FileSink<>(this);
@@ -595,6 +632,11 @@ public class FileSink<IN>
         @Override
         FileCommitter createCommitter() throws IOException {
             return new FileCommitter(createBucketWriter());
+        }
+
+        @Override
+        boolean isCompactDisabledExplicitly() {
+            return isCompactDisabledExplicitly;
         }
 
         @Override

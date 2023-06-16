@@ -15,7 +15,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.flink.table.planner.runtime.batch.sql.agg
 
 import org.apache.flink.api.scala._
@@ -25,18 +24,15 @@ import org.apache.flink.table.planner.runtime.utils.BatchTestBase.row
 import org.apache.flink.table.planner.runtime.utils.JavaUserDefinedAggFunctions.WeightedAvgWithMergeAndReset
 import org.apache.flink.table.planner.utils.{CountAggFunction, IntSumAggFunction}
 
-import org.junit.Test
+import org.junit.jupiter.api.Test
 
-import scala.collection.Seq
-
-/**
-  * DistinctAggregateITCase using SortAgg Operator.
-  */
+/** DistinctAggregateITCase using SortAgg Operator. */
 class SortDistinctAggregateITCase extends DistinctAggregateITCaseBase {
 
   override def prepareAggOp(): Unit = {
     tEnv.getConfig.set(
-      ExecutionConfigOptions.TABLE_EXEC_DISABLED_OPERATORS,  OperatorType.HashAgg.toString)
+      ExecutionConfigOptions.TABLE_EXEC_DISABLED_OPERATORS,
+      OperatorType.HashAgg.toString)
 
     registerFunction("countFun", new CountAggFunction())
     registerFunction("intSumFun", new IntSumAggFunction())

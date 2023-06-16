@@ -54,14 +54,13 @@ import org.apache.flink.streaming.util.KeyedOneInputStreamOperatorTestHarness;
 import org.apache.flink.streaming.util.OneInputStreamOperatorTestHarness;
 import org.apache.flink.streaming.util.OperatorSnapshotUtil;
 import org.apache.flink.streaming.util.TestHarnessUtil;
+import org.apache.flink.test.util.MigrationTest;
 import org.apache.flink.util.Collector;
 
-import org.junit.Ignore;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 
-import java.util.Arrays;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -76,40 +75,18 @@ import static org.junit.Assert.fail;
  *
  * <p>This also checks whether {@link WindowOperator} can restore from a checkpoint of the aligned
  * processing-time windows operator of previous Flink versions.
- *
- * <p>For regenerating the binary snapshot file you have to run the {@code write*()} method on the
- * corresponding Flink release-* branch.
  */
 @RunWith(Parameterized.class)
-public class WindowOperatorMigrationTest {
+public class WindowOperatorMigrationTest implements MigrationTest {
 
     @Parameterized.Parameters(name = "Migration Savepoint: {0}")
     public static Collection<FlinkVersion> parameters() {
-        return Arrays.asList(
-                FlinkVersion.v1_3,
-                FlinkVersion.v1_4,
-                FlinkVersion.v1_5,
-                FlinkVersion.v1_6,
-                FlinkVersion.v1_7,
-                FlinkVersion.v1_8,
-                FlinkVersion.v1_9,
-                FlinkVersion.v1_10,
-                FlinkVersion.v1_11,
-                FlinkVersion.v1_12,
-                FlinkVersion.v1_13,
-                FlinkVersion.v1_14);
+        return FlinkVersion.rangeOf(
+                FlinkVersion.v1_8, MigrationTest.getMostRecentlyPublishedVersion());
     }
 
     private static final TypeInformation<Tuple2<String, Integer>> STRING_INT_TUPLE =
             TypeInformation.of(new TypeHint<Tuple2<String, Integer>>() {});
-
-    /**
-     * TODO change this to the corresponding savepoint version to be written (e.g. {@link
-     * FlinkVersion#v1_3} for 1.3) TODO and remove all @Ignore annotations on write*Snapshot()
-     * methods to generate savepoints TODO Note: You should generate the savepoint based on the
-     * release branch instead of the master.
-     */
-    private final FlinkVersion flinkGenerateSavepointVersion = null;
 
     private final FlinkVersion testMigrateVersion;
 
@@ -117,10 +94,9 @@ public class WindowOperatorMigrationTest {
         this.testMigrateVersion = testMigrateVersion;
     }
 
-    /** Manually run this to write binary snapshot data. */
-    @Ignore
-    @Test
-    public void writeSessionWindowsWithCountTriggerSnapshot() throws Exception {
+    @SnapshotsGenerator
+    public void writeSessionWindowsWithCountTriggerSnapshot(
+            FlinkVersion flinkGenerateSavepointVersion) throws Exception {
         final int sessionSize = 3;
 
         ListStateDescriptor<Tuple2<String, Integer>> stateDesc =
@@ -249,10 +225,9 @@ public class WindowOperatorMigrationTest {
         testHarness.close();
     }
 
-    /** Manually run this to write binary snapshot data. */
-    @Ignore
-    @Test
-    public void writeSessionWindowsWithCountTriggerInMintConditionSnapshot() throws Exception {
+    @SnapshotsGenerator
+    public void writeSessionWindowsWithCountTriggerInMintConditionSnapshot(
+            FlinkVersion flinkGenerateSavepointVersion) throws Exception {
 
         final int sessionSize = 3;
 
@@ -387,10 +362,9 @@ public class WindowOperatorMigrationTest {
         testHarness.close();
     }
 
-    /** Manually run this to write binary snapshot data. */
-    @Ignore
-    @Test
-    public void writeReducingEventTimeWindowsSnapshot() throws Exception {
+    @SnapshotsGenerator
+    public void writeReducingEventTimeWindowsSnapshot(FlinkVersion flinkGenerateSavepointVersion)
+            throws Exception {
         final int windowSize = 3;
 
         ReducingStateDescriptor<Tuple2<String, Integer>> stateDesc =
@@ -540,10 +514,9 @@ public class WindowOperatorMigrationTest {
         testHarness.close();
     }
 
-    /** Manually run this to write binary snapshot data. */
-    @Ignore
-    @Test
-    public void writeApplyEventTimeWindowsSnapshot() throws Exception {
+    @SnapshotsGenerator
+    public void writeApplyEventTimeWindowsSnapshot(FlinkVersion flinkGenerateSavepointVersion)
+            throws Exception {
         final int windowSize = 3;
 
         ListStateDescriptor<Tuple2<String, Integer>> stateDesc =
@@ -689,10 +662,9 @@ public class WindowOperatorMigrationTest {
         testHarness.close();
     }
 
-    /** Manually run this to write binary snapshot data. */
-    @Ignore
-    @Test
-    public void writeReducingProcessingTimeWindowsSnapshot() throws Exception {
+    @SnapshotsGenerator
+    public void writeReducingProcessingTimeWindowsSnapshot(
+            FlinkVersion flinkGenerateSavepointVersion) throws Exception {
         final int windowSize = 3;
 
         ReducingStateDescriptor<Tuple2<String, Integer>> stateDesc =
@@ -828,10 +800,9 @@ public class WindowOperatorMigrationTest {
         testHarness.close();
     }
 
-    /** Manually run this to write binary snapshot data. */
-    @Ignore
-    @Test
-    public void writeApplyProcessingTimeWindowsSnapshot() throws Exception {
+    @SnapshotsGenerator
+    public void writeApplyProcessingTimeWindowsSnapshot(FlinkVersion flinkGenerateSavepointVersion)
+            throws Exception {
         final int windowSize = 3;
 
         ListStateDescriptor<Tuple2<String, Integer>> stateDesc =
@@ -963,10 +934,9 @@ public class WindowOperatorMigrationTest {
         testHarness.close();
     }
 
-    /** Manually run this to write binary snapshot data. */
-    @Ignore
-    @Test
-    public void writeWindowsWithKryoSerializedKeysSnapshot() throws Exception {
+    @SnapshotsGenerator
+    public void writeWindowsWithKryoSerializedKeysSnapshot(
+            FlinkVersion flinkGenerateSavepointVersion) throws Exception {
         final int windowSize = 3;
 
         TypeInformation<Tuple2<NonPojoType, Integer>> inputType =

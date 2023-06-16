@@ -15,20 +15,19 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.flink.table.planner.runtime.stream.sql
 
 import org.apache.flink.api.scala._
 import org.apache.flink.table.api._
 import org.apache.flink.table.api.bridge.scala._
 import org.apache.flink.table.planner.plan.nodes.exec.stream.StreamExecSort
-import org.apache.flink.table.planner.runtime.utils.StreamingWithStateTestBase.StateBackendMode
 import org.apache.flink.table.planner.runtime.utils._
+import org.apache.flink.table.planner.runtime.utils.StreamingWithStateTestBase.StateBackendMode
 import org.apache.flink.table.planner.utils.InternalConfigOptions
 import org.apache.flink.types.Row
 
-import org.junit.Assert._
 import org.junit._
+import org.junit.Assert._
 import org.junit.runner.RunWith
 import org.junit.runners.Parameterized
 
@@ -47,7 +46,7 @@ class SortITCase(mode: StateBackendMode) extends StreamingWithStateTestBase(mode
     data.+=(("5", "1"))
 
     val da = env.fromCollection(data).toTable(tEnv, 'a1, 'a2)
-    tEnv.registerTable("a", da)
+    tEnv.createTemporaryView("a", da)
 
     thrown.expect(classOf[TableException])
     thrown.expectMessage("Sort on a non-time-attribute field is not supported.")
@@ -64,7 +63,7 @@ class SortITCase(mode: StateBackendMode) extends StreamingWithStateTestBase(mode
     data.+=(("5", "1"))
 
     val da = failingDataSource(data).toTable(tEnv, 'a1, 'a2)
-    tEnv.registerTable("a", da)
+    tEnv.createTemporaryView("a", da)
 
     val sink = new TestingRetractSink
     tEnv.getConfig
@@ -73,11 +72,7 @@ class SortITCase(mode: StateBackendMode) extends StreamingWithStateTestBase(mode
     results.addSink(sink).setParallelism(1)
     env.execute()
 
-    val expected = Seq(
-      "5,1",
-      "1,2",
-      "3,3",
-      "0,4")
+    val expected = Seq("5,1", "1,2", "3,3", "0,4")
 
     assertEquals(expected, sink.getRetractResults)
   }
@@ -93,7 +88,7 @@ class SortITCase(mode: StateBackendMode) extends StreamingWithStateTestBase(mode
     data.+=(("5", "1"))
 
     val da = failingDataSource(data).toTable(tEnv, 'a1, 'a2)
-    tEnv.registerTable("a", da)
+    tEnv.createTemporaryView("a", da)
 
     val sink = new TestingRetractSink
     tEnv.getConfig.set(
@@ -103,11 +98,7 @@ class SortITCase(mode: StateBackendMode) extends StreamingWithStateTestBase(mode
     results.addSink(sink).setParallelism(1)
     env.execute()
 
-    val expected = Seq(
-      "5,1",
-      "3,3",
-      "1,2",
-      "0,4")
+    val expected = Seq("5,1", "3,3", "1,2", "0,4")
 
     assertEquals(expected, sink.getRetractResults)
   }
@@ -123,7 +114,7 @@ class SortITCase(mode: StateBackendMode) extends StreamingWithStateTestBase(mode
     data.+=(("1", "2"))
 
     val da = failingDataSource(data).toTable(tEnv, 'a1, 'a2)
-    tEnv.registerTable("a", da)
+    tEnv.createTemporaryView("a", da)
 
     val sink = new TestingRetractSink
     tEnv.getConfig
@@ -132,11 +123,7 @@ class SortITCase(mode: StateBackendMode) extends StreamingWithStateTestBase(mode
     results.addSink(sink).setParallelism(1)
     env.execute()
 
-    val expected = Seq(
-      "0,4",
-      "1,2",
-      "1,7",
-      "5,1")
+    val expected = Seq("0,4", "1,2", "1,7", "5,1")
 
     assertEquals(expected, sink.getRetractResults)
   }
@@ -152,7 +139,7 @@ class SortITCase(mode: StateBackendMode) extends StreamingWithStateTestBase(mode
     data.+=(("2", "2"))
 
     val da = failingDataSource(data).toTable(tEnv, 'a1, 'a2)
-    tEnv.registerTable("a", da)
+    tEnv.createTemporaryView("a", da)
 
     val sink = new TestingRetractSink
     tEnv.getConfig
@@ -161,11 +148,7 @@ class SortITCase(mode: StateBackendMode) extends StreamingWithStateTestBase(mode
     results.addSink(sink).setParallelism(1)
     env.execute()
 
-    val expected = Seq(
-      "0,4",
-      "1,7",
-      "2,2",
-      "5,1")
+    val expected = Seq("0,4", "1,7", "2,2", "5,1")
 
     assertEquals(expected, sink.getRetractResults)
   }
@@ -187,7 +170,7 @@ class SortITCase(mode: StateBackendMode) extends StreamingWithStateTestBase(mode
     data.+=(("6", "2"))
 
     val da = failingDataSource(data).toTable(tEnv, 'a1, 'a2)
-    tEnv.registerTable("a", da)
+    tEnv.createTemporaryView("a", da)
 
     val sink = new TestingRetractSink
     tEnv.getConfig
@@ -196,11 +179,7 @@ class SortITCase(mode: StateBackendMode) extends StreamingWithStateTestBase(mode
     results.addSink(sink).setParallelism(1)
     env.execute()
 
-    val expected = Seq(
-      "2,1",
-      "6,2",
-      "1,3",
-      "3,4")
+    val expected = Seq("2,1", "6,2", "1,3", "3,4")
 
     assertEquals(expected, sink.getRetractResults)
   }
@@ -220,7 +199,7 @@ class SortITCase(mode: StateBackendMode) extends StreamingWithStateTestBase(mode
     data.+=((4, 5))
 
     val da = failingDataSource(data).toTable(tEnv, 'a1)
-    tEnv.registerTable("a", da)
+    tEnv.createTemporaryView("a", da)
 
     val sink = new TestingRetractSink
     tEnv.getConfig
@@ -229,11 +208,7 @@ class SortITCase(mode: StateBackendMode) extends StreamingWithStateTestBase(mode
     results.addSink(sink).setParallelism(1)
     env.execute()
 
-    val expected = Seq(
-      "7",
-      "6",
-      "5",
-      "4")
+    val expected = Seq("7", "6", "5", "4")
 
     assertEquals(expected, sink.getRetractResults)
   }

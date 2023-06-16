@@ -22,6 +22,7 @@ import org.apache.flink.annotation.Public;
 import org.apache.flink.annotation.PublicEvolving;
 import org.apache.flink.api.common.operators.ResourceSpec;
 import org.apache.flink.api.common.operators.SlotSharingGroup;
+import org.apache.flink.api.common.operators.util.OperatorValidationUtils;
 import org.apache.flink.api.connector.sink2.Sink;
 import org.apache.flink.api.dag.Transformation;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
@@ -59,13 +60,17 @@ public class DataStreamSink<T> {
                         inputStream.getTransformation(),
                         "Unnamed",
                         sinkOperator,
-                        executionEnvironment.getParallelism());
+                        executionEnvironment.getParallelism(),
+                        false);
         executionEnvironment.addOperator(transformation);
         return new DataStreamSink<>(transformation);
     }
 
     @Internal
-    public static <T> DataStreamSink<T> forSink(DataStream<T> inputStream, Sink<T> sink) {
+    public static <T> DataStreamSink<T> forSink(
+            DataStream<T> inputStream,
+            Sink<T> sink,
+            CustomSinkOperatorUidHashes customSinkOperatorUidHashes) {
         final StreamExecutionEnvironment executionEnvironment =
                 inputStream.getExecutionEnvironment();
         SinkTransformation<T, T> transformation =
@@ -74,15 +79,19 @@ public class DataStreamSink<T> {
                         sink,
                         inputStream.getType(),
                         "Sink",
-                        executionEnvironment.getParallelism());
+                        executionEnvironment.getParallelism(),
+                        false,
+                        customSinkOperatorUidHashes);
         executionEnvironment.addOperator(transformation);
         return new DataStreamSink<>(transformation);
     }
 
     @Internal
     public static <T> DataStreamSink<T> forSinkV1(
-            DataStream<T> inputStream, org.apache.flink.api.connector.sink.Sink<T, ?, ?, ?> sink) {
-        return forSink(inputStream, SinkV1Adapter.wrap(sink));
+            DataStream<T> inputStream,
+            org.apache.flink.api.connector.sink.Sink<T, ?, ?, ?> sink,
+            CustomSinkOperatorUidHashes customSinkOperatorUidHashes) {
+        return forSink(inputStream, SinkV1Adapter.wrap(sink), customSinkOperatorUidHashes);
     }
 
     /** Returns the transformation that contains the actual sink operator of this sink. */
@@ -169,6 +178,21 @@ public class DataStreamSink<T> {
      */
     public DataStreamSink<T> setParallelism(int parallelism) {
         transformation.setParallelism(parallelism);
+        return this;
+    }
+
+    /**
+     * Sets the max parallelism for this sink.
+     *
+     * <p>The maximum parallelism specifies the upper bound for dynamic scaling. The degree must be
+     * higher than zero and less than the upper bound.
+     *
+     * @param maxParallelism The max parallelism for this sink.
+     * @return The sink with set parallelism.
+     */
+    public DataStreamSink<T> setMaxParallelism(int maxParallelism) {
+        OperatorValidationUtils.validateMaxParallelism(maxParallelism, true);
+        transformation.setMaxParallelism(maxParallelism);
         return this;
     }
 

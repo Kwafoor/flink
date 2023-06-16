@@ -30,9 +30,7 @@ import org.apache.flink.types.Row;
 import org.apache.flink.types.RowKind;
 import org.apache.flink.util.InstantiationUtil;
 
-import org.junit.Rule;
 import org.junit.Test;
-import org.junit.rules.ExpectedException;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameter;
@@ -87,8 +85,8 @@ import static org.apache.flink.table.api.DataTypes.TIMESTAMP_WITH_TIME_ZONE;
 import static org.apache.flink.table.api.DataTypes.VARBINARY;
 import static org.apache.flink.table.api.DataTypes.VARCHAR;
 import static org.apache.flink.table.api.DataTypes.YEAR;
-import static org.hamcrest.CoreMatchers.equalTo;
-import static org.junit.Assert.assertArrayEquals;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Tests for {@link DataStructureConverters}. */
 @RunWith(Parameterized.class)
@@ -197,6 +195,14 @@ public class DataStructureConvertersTest {
                                         Arrays.asList(
                                                 1, 2, 3,
                                                 4))), // test List that is not backed by an array
+
+                // test for Array with default conversion class
+                TestSpec.forDataType(ARRAY(INT().notNull()))
+                        .disableBridging()
+                        .convertedTo(int[].class, new int[] {1, 2, 3, 4}),
+                TestSpec.forDataType(ARRAY(INT()))
+                        .disableBridging()
+                        .convertedTo(Integer[].class, new Integer[] {1, 2, 3, 4}),
 
                 // arrays of TINYINT, SMALLINT, INTEGER, BIGINT, FLOAT, DOUBLE are skipped for
                 // simplicity
@@ -367,38 +373,41 @@ public class DataStructureConvertersTest {
 
     @Parameter public TestSpec testSpec;
 
-    @Rule public ExpectedException thrown = ExpectedException.none();
-
     @Test
     public void testConversions() {
-        if (testSpec.expectedErrorMessage != null) {
-            thrown.expect(TableException.class);
-            thrown.expectMessage(equalTo(testSpec.expectedErrorMessage));
-        }
         for (Map.Entry<Class<?>, Object> from : testSpec.conversions.entrySet()) {
-            final DataType fromDataType = testSpec.dataType.bridgedTo(from.getKey());
-
-            final DataStructureConverter<Object, Object> fromConverter =
-                    simulateSerialization(DataStructureConverters.getConverter(fromDataType));
-            fromConverter.open(DataStructureConvertersTest.class.getClassLoader());
-
-            final Object internalValue = fromConverter.toInternalOrNull(from.getValue());
-
-            final Object anotherValue = testSpec.conversionsWithAnotherValue.get(from.getKey());
-            if (anotherValue != null) {
-                fromConverter.toInternalOrNull(anotherValue);
+            DataType fromDataType = testSpec.dataType;
+            if (testSpec.bridgeToTargetClass) {
+                fromDataType = testSpec.dataType.bridgedTo(from.getKey());
             }
 
-            for (Map.Entry<Class<?>, Object> to : testSpec.conversions.entrySet()) {
-                final DataType toDataType = testSpec.dataType.bridgedTo(to.getKey());
+            if (testSpec.expectedErrorMessage != null) {
+                final DataType type = fromDataType;
+                assertThatThrownBy(() -> DataStructureConverters.getConverter(type))
+                        .isInstanceOf(TableException.class)
+                        .hasMessage(testSpec.expectedErrorMessage);
+            } else {
+                final DataStructureConverter<Object, Object> fromConverter =
+                        simulateSerialization(DataStructureConverters.getConverter(fromDataType));
+                fromConverter.open(DataStructureConvertersTest.class.getClassLoader());
 
-                final DataStructureConverter<Object, Object> toConverter =
-                        simulateSerialization(DataStructureConverters.getConverter(toDataType));
-                toConverter.open(DataStructureConvertersTest.class.getClassLoader());
+                final Object internalValue = fromConverter.toInternalOrNull(from.getValue());
 
-                assertArrayEquals(
-                        new Object[] {to.getValue()},
-                        new Object[] {toConverter.toExternalOrNull(internalValue)});
+                final Object anotherValue = testSpec.conversionsWithAnotherValue.get(from.getKey());
+                if (anotherValue != null) {
+                    fromConverter.toInternalOrNull(anotherValue);
+                }
+
+                for (Map.Entry<Class<?>, Object> to : testSpec.conversions.entrySet()) {
+                    final DataType toDataType = testSpec.dataType.bridgedTo(to.getKey());
+
+                    final DataStructureConverter<Object, Object> toConverter =
+                            simulateSerialization(DataStructureConverters.getConverter(toDataType));
+                    toConverter.open(DataStructureConvertersTest.class.getClassLoader());
+
+                    assertThat(toConverter.toExternalOrNull(internalValue))
+                            .isEqualTo(to.getValue());
+                }
             }
         }
     }
@@ -417,6 +426,8 @@ public class DataStructureConvertersTest {
 
         private final Map<Class<?>, Object> conversionsWithAnotherValue;
 
+        private boolean bridgeToTargetClass;
+
         private @Nullable String expectedErrorMessage;
 
         private TestSpec(String description, DataType dataType) {
@@ -424,6 +435,7 @@ public class DataStructureConvertersTest {
             this.dataType = dataType;
             this.conversions = new LinkedHashMap<>();
             this.conversionsWithAnotherValue = new LinkedHashMap<>();
+            this.bridgeToTargetClass = true;
         }
 
         static TestSpec forDataType(AbstractDataType<?> dataType) {
@@ -453,6 +465,11 @@ public class DataStructureConvertersTest {
 
         TestSpec expectErrorMessage(String expectedErrorMessage) {
             this.expectedErrorMessage = expectedErrorMessage;
+            return this;
+        }
+
+        TestSpec disableBridging() {
+            this.bridgeToTargetClass = false;
             return this;
         }
 

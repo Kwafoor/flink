@@ -30,7 +30,7 @@ import org.apache.flink.runtime.state.OperatorStreamStateHandle;
 import org.apache.flink.runtime.state.ResultSubpartitionStateHandle;
 import org.apache.flink.runtime.state.SnapshotResult;
 import org.apache.flink.runtime.state.memory.ByteStreamStateHandle;
-import org.apache.flink.streaming.runtime.tasks.ExceptionallyDoneFuture;
+import org.apache.flink.runtime.testutils.ExceptionallyDoneFuture;
 import org.apache.flink.util.TestLogger;
 
 import org.junit.Test;
@@ -40,8 +40,8 @@ import java.util.concurrent.RunnableFuture;
 
 import static org.junit.Assert.assertEquals;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
-import static org.powermock.api.mockito.PowerMockito.spy;
 
 /** Tests for {@link OperatorSnapshotFutures}. */
 public class OperatorSnapshotFuturesTest extends TestLogger {

@@ -22,6 +22,7 @@ import org.apache.flink.api.dag.Transformation;
 import org.apache.flink.streaming.api.transformations.UnionTransformation;
 import org.apache.flink.table.api.CompiledPlan;
 import org.apache.flink.table.api.EnvironmentSettings;
+import org.apache.flink.table.api.PlanReference;
 import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.TableResult;
 import org.apache.flink.table.api.internal.CompiledPlanUtils;
@@ -32,8 +33,6 @@ import org.apache.flink.util.StringUtils;
 
 import org.junit.After;
 import org.junit.Before;
-import org.junit.Rule;
-import org.junit.rules.ExpectedException;
 
 import javax.annotation.Nullable;
 
@@ -46,17 +45,15 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import static org.apache.flink.util.Preconditions.checkArgument;
 import static org.apache.flink.util.Preconditions.checkNotNull;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.Assert.assertEquals;
 
 /** The base class for json plan testing. */
 public abstract class JsonPlanTestBase extends AbstractTestBase {
-
-    @Rule public ExpectedException exception = ExpectedException.none();
 
     protected TableEnvironment tableEnv;
 
@@ -71,9 +68,19 @@ public abstract class JsonPlanTestBase extends AbstractTestBase {
     }
 
     protected TableResult compileSqlAndExecutePlan(String sql) {
+        return compileSqlAndExecutePlan(sql, json -> json);
+    }
+
+    protected TableResult compileSqlAndExecutePlan(
+            String sql, Function<String, String> jsonPlanTransformer) {
         CompiledPlan compiledPlan = tableEnv.compilePlanSql(sql);
         checkTransformationUids(compiledPlan);
-        return compiledPlan.execute();
+        // try to execute the string json plan to validate to ser/de result
+        CompiledPlan newCompiledPlan =
+                tableEnv.loadPlan(
+                        PlanReference.fromJsonString(
+                                jsonPlanTransformer.apply(compiledPlan.asJsonString())));
+        return newCompiledPlan.execute();
     }
 
     protected void checkTransformationUids(CompiledPlan compiledPlan) {
@@ -264,7 +271,7 @@ public abstract class JsonPlanTestBase extends AbstractTestBase {
     protected void assertResult(List<String> expected, List<String> actual) {
         Collections.sort(expected);
         Collections.sort(actual);
-        assertEquals(expected, actual);
+        assertThat(actual).isEqualTo(expected);
     }
 
     protected List<String> readLines(File path) throws IOException {

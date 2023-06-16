@@ -62,12 +62,13 @@ import java.util.function.Supplier;
 
 import static org.apache.flink.core.testutils.FlinkAssertions.STREAM_THROWABLE;
 import static org.apache.flink.core.testutils.FlinkAssertions.anyCauseMatches;
+import static org.apache.flink.core.testutils.FlinkAssertions.assertThatFuture;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Tests for the {@link SessionDispatcherLeaderProcess}. */
 @ExtendWith(TestLoggerExtension.class)
-public class SessionDispatcherLeaderProcessTest {
+class SessionDispatcherLeaderProcessTest {
 
     private static final JobGraph JOB_GRAPH = JobGraphTestUtils.emptyJobGraph();
 
@@ -84,12 +85,12 @@ public class SessionDispatcherLeaderProcessTest {
             dispatcherServiceFactory;
 
     @BeforeAll
-    public static void setupClass() {
+    static void setupClass() {
         ioExecutor = Executors.newSingleThreadExecutor();
     }
 
     @BeforeEach
-    public void setup() {
+    void setup() {
         fatalErrorHandler = new TestingFatalErrorHandler();
         jobGraphStore = TestingJobGraphStore.newBuilder().build();
         jobResultStore = TestingJobResultStore.builder().build();
@@ -99,7 +100,7 @@ public class SessionDispatcherLeaderProcessTest {
     }
 
     @AfterEach
-    public void teardown() throws Exception {
+    void teardown() throws Exception {
         if (fatalErrorHandler != null) {
             fatalErrorHandler.rethrowError();
             fatalErrorHandler = null;
@@ -107,14 +108,14 @@ public class SessionDispatcherLeaderProcessTest {
     }
 
     @AfterAll
-    public static void teardownClass() {
+    static void teardownClass() {
         if (ioExecutor != null) {
             ExecutorUtils.gracefulShutdown(5L, TimeUnit.SECONDS, ioExecutor);
         }
     }
 
     @Test
-    public void start_afterClose_doesNotHaveAnEffect() throws Exception {
+    void start_afterClose_doesNotHaveAnEffect() throws Exception {
         final SessionDispatcherLeaderProcess dispatcherLeaderProcess =
                 createDispatcherLeaderProcess();
 
@@ -126,7 +127,7 @@ public class SessionDispatcherLeaderProcessTest {
     }
 
     @Test
-    public void testStartTriggeringDispatcherServiceCreation() throws Exception {
+    void testStartTriggeringDispatcherServiceCreation() throws Exception {
         dispatcherServiceFactory =
                 createFactoryBasedOnGenericSupplier(
                         () -> TestingDispatcherGatewayService.newBuilder().build());
@@ -140,7 +141,7 @@ public class SessionDispatcherLeaderProcessTest {
     }
 
     @Test
-    public void testRecoveryWithJobGraphButNoDirtyJobResult() throws Exception {
+    void testRecoveryWithJobGraphButNoDirtyJobResult() throws Exception {
         testJobRecovery(
                 Collections.singleton(JOB_GRAPH),
                 Collections.emptySet(),
@@ -151,7 +152,7 @@ public class SessionDispatcherLeaderProcessTest {
     }
 
     @Test
-    public void testRecoveryWithJobGraphAndMatchingDirtyJobResult() throws Exception {
+    void testRecoveryWithJobGraphAndMatchingDirtyJobResult() throws Exception {
         final JobResult matchingDirtyJobResult =
                 TestingJobResultStore.createSuccessfulJobResult(JOB_GRAPH.getJobID());
 
@@ -166,7 +167,7 @@ public class SessionDispatcherLeaderProcessTest {
     }
 
     @Test
-    public void testRecoveryWithMultipleJobGraphsAndOneMatchingDirtyJobResult() throws Exception {
+    void testRecoveryWithMultipleJobGraphsAndOneMatchingDirtyJobResult() throws Exception {
         final JobResult matchingDirtyJobResult =
                 TestingJobResultStore.createSuccessfulJobResult(JOB_GRAPH.getJobID());
         final JobGraph otherJobGraph = JobGraphTestUtils.emptyJobGraph();
@@ -185,7 +186,7 @@ public class SessionDispatcherLeaderProcessTest {
     }
 
     @Test
-    public void testRecoveryWithoutJobGraphButDirtyJobResult() throws Exception {
+    void testRecoveryWithoutJobGraphButDirtyJobResult() throws Exception {
         final JobResult dirtyJobResult =
                 TestingJobResultStore.createSuccessfulJobResult(new JobID());
 
@@ -238,7 +239,72 @@ public class SessionDispatcherLeaderProcessTest {
     }
 
     @Test
-    public void closeAsync_stopsJobGraphStoreAndDispatcher() throws Exception {
+    void testRecoveryWhileJobGraphRecoveryIsScheduledConcurrently() throws Exception {
+        final JobResult dirtyJobResult =
+                TestingJobResultStore.createSuccessfulJobResult(new JobID());
+
+        OneShotLatch recoveryInitiatedLatch = new OneShotLatch();
+        OneShotLatch jobGraphAddedLatch = new OneShotLatch();
+
+        jobGraphStore =
+                TestingJobGraphStore.newBuilder()
+                        // mimic behavior when recovering a JobGraph that is marked for deletion
+                        .setRecoverJobGraphFunction((jobId, jobs) -> null)
+                        .build();
+
+        jobResultStore =
+                TestingJobResultStore.builder()
+                        .withGetDirtyResultsSupplier(
+                                () -> {
+                                    recoveryInitiatedLatch.trigger();
+                                    try {
+                                        jobGraphAddedLatch.await();
+                                    } catch (InterruptedException e) {
+                                        Thread.currentThread().interrupt();
+                                    }
+                                    return Collections.singleton(dirtyJobResult);
+                                })
+                        .build();
+
+        final CompletableFuture<Collection<JobGraph>> recoveredJobGraphsFuture =
+                new CompletableFuture<>();
+        final CompletableFuture<Collection<JobResult>> recoveredDirtyJobResultsFuture =
+                new CompletableFuture<>();
+        dispatcherServiceFactory =
+                (ignoredDispatcherId,
+                        recoveredJobs,
+                        recoveredDirtyJobResults,
+                        ignoredJobGraphWriter,
+                        ignoredJobResultStore) -> {
+                    recoveredJobGraphsFuture.complete(recoveredJobs);
+                    recoveredDirtyJobResultsFuture.complete(recoveredDirtyJobResults);
+                    return TestingDispatcherGatewayService.newBuilder().build();
+                };
+
+        try (final SessionDispatcherLeaderProcess dispatcherLeaderProcess =
+                createDispatcherLeaderProcess()) {
+            dispatcherLeaderProcess.start();
+
+            // start returns without the initial recovery being completed
+            // mimic ZK message about an added jobgraph while the recovery is ongoing
+            recoveryInitiatedLatch.await();
+            dispatcherLeaderProcess.onAddedJobGraph(dirtyJobResult.getJobId());
+            jobGraphAddedLatch.trigger();
+
+            assertThatFuture(recoveredJobGraphsFuture)
+                    .eventuallySucceeds()
+                    .satisfies(recoverJobGraphs -> assertThat(recoverJobGraphs).isEmpty());
+            assertThatFuture(recoveredDirtyJobResultsFuture)
+                    .eventuallySucceeds()
+                    .satisfies(
+                            recoveredDirtyJobResults ->
+                                    assertThat(recoveredDirtyJobResults)
+                                            .containsExactly(dirtyJobResult));
+        }
+    }
+
+    @Test
+    void closeAsync_stopsJobGraphStoreAndDispatcher() throws Exception {
         final CompletableFuture<Void> jobGraphStopFuture = new CompletableFuture<>();
         jobGraphStore =
                 TestingJobGraphStore.newBuilder()
@@ -278,7 +344,7 @@ public class SessionDispatcherLeaderProcessTest {
     }
 
     @Test
-    public void unexpectedDispatcherServiceTerminationWhileRunning_callsFatalErrorHandler() {
+    void unexpectedDispatcherServiceTerminationWhileRunning_callsFatalErrorHandler() {
         final CompletableFuture<Void> terminationFuture = new CompletableFuture<>();
         dispatcherServiceFactory =
                 createFactoryBasedOnGenericSupplier(
@@ -295,14 +361,13 @@ public class SessionDispatcherLeaderProcessTest {
         terminationFuture.completeExceptionally(expectedFailure);
 
         final Throwable error = fatalErrorHandler.getErrorFuture().join();
-        assertThat(error).getRootCause().isEqualTo(expectedFailure);
+        assertThat(error).rootCause().isEqualTo(expectedFailure);
 
         fatalErrorHandler.clearError();
     }
 
     @Test
-    public void
-            unexpectedDispatcherServiceTerminationWhileNotRunning_doesNotCallFatalErrorHandler() {
+    void unexpectedDispatcherServiceTerminationWhileNotRunning_doesNotCallFatalErrorHandler() {
         final CompletableFuture<Void> terminationFuture = new CompletableFuture<>();
         dispatcherServiceFactory =
                 createFactoryBasedOnGenericSupplier(
@@ -325,7 +390,7 @@ public class SessionDispatcherLeaderProcessTest {
     }
 
     @Test
-    public void confirmLeaderSessionFuture_completesAfterDispatcherServiceHasBeenStarted()
+    void confirmLeaderSessionFuture_completesAfterDispatcherServiceHasBeenStarted()
             throws Exception {
         final OneShotLatch createDispatcherServiceLatch = new OneShotLatch();
         final String dispatcherAddress = "myAddress";
@@ -356,14 +421,14 @@ public class SessionDispatcherLeaderProcessTest {
 
             createDispatcherServiceLatch.trigger();
 
-            assertThat(confirmLeaderSessionFuture)
-                    .succeedsWithin(100, TimeUnit.MILLISECONDS)
+            assertThatFuture(confirmLeaderSessionFuture)
+                    .eventuallySucceeds()
                     .isEqualTo(dispatcherAddress);
         }
     }
 
     @Test
-    public void closeAsync_duringJobRecovery_preventsDispatcherServiceCreation() throws Exception {
+    void closeAsync_duringJobRecovery_preventsDispatcherServiceCreation() throws Exception {
         final OneShotLatch jobRecoveryStartedLatch = new OneShotLatch();
         final OneShotLatch completeJobRecoveryLatch = new OneShotLatch();
         final OneShotLatch createDispatcherServiceLatch = new OneShotLatch();
@@ -403,7 +468,7 @@ public class SessionDispatcherLeaderProcessTest {
     }
 
     @Test
-    public void onRemovedJobGraph_terminatesRunningJob() throws Exception {
+    void onRemovedJobGraph_terminatesRunningJob() throws Exception {
         jobGraphStore =
                 TestingJobGraphStore.newBuilder()
                         .setInitialJobGraphs(Collections.singleton(JOB_GRAPH))
@@ -441,7 +506,7 @@ public class SessionDispatcherLeaderProcessTest {
     }
 
     @Test
-    public void onRemovedJobGraph_failingRemovalCall_failsFatally() throws Exception {
+    void onRemovedJobGraph_failingRemovalCall_failsFatally() throws Exception {
         final FlinkException testException = new FlinkException("Test exception");
 
         final TestingDispatcherGatewayService testingDispatcherService =
@@ -472,7 +537,7 @@ public class SessionDispatcherLeaderProcessTest {
     }
 
     @Test
-    public void onAddedJobGraph_submitsRecoveredJob() throws Exception {
+    void onAddedJobGraph_submitsRecoveredJob() throws Exception {
         final CompletableFuture<JobGraph> submittedJobFuture = new CompletableFuture<>();
         final TestingDispatcherGateway testingDispatcherGateway =
                 TestingDispatcherGateway.newBuilder()
@@ -507,7 +572,7 @@ public class SessionDispatcherLeaderProcessTest {
     }
 
     @Test
-    public void onAddedJobGraph_ifNotRunning_isBeingIgnored() throws Exception {
+    void onAddedJobGraph_ifNotRunning_isBeingIgnored() throws Exception {
         final CompletableFuture<JobID> recoveredJobFuture = new CompletableFuture<>();
         jobGraphStore =
                 TestingJobGraphStore.newBuilder()
@@ -540,7 +605,7 @@ public class SessionDispatcherLeaderProcessTest {
     }
 
     @Test
-    public void onAddedJobGraph_failingRecovery_propagatesTheFailure() throws Exception {
+    void onAddedJobGraph_failingRecovery_propagatesTheFailure() throws Exception {
         final FlinkException expectedFailure = new FlinkException("Expected failure");
         jobGraphStore =
                 TestingJobGraphStore.newBuilder()
@@ -560,8 +625,8 @@ public class SessionDispatcherLeaderProcessTest {
             jobGraphStore.putJobGraph(JOB_GRAPH);
             dispatcherLeaderProcess.onAddedJobGraph(JOB_GRAPH.getJobID());
 
-            assertThat(fatalErrorHandler.getErrorFuture())
-                    .succeedsWithin(100, TimeUnit.MILLISECONDS)
+            assertThatFuture(fatalErrorHandler.getErrorFuture())
+                    .eventuallySucceeds()
                     .extracting(FlinkAssertions::chainOfCauses, STREAM_THROWABLE)
                     .contains(expectedFailure);
 
@@ -573,7 +638,7 @@ public class SessionDispatcherLeaderProcessTest {
     }
 
     @Test
-    public void recoverJobs_withRecoveryFailure_failsFatally() throws Exception {
+    void recoverJobs_withRecoveryFailure_failsFatally() throws Exception {
         final FlinkException testException = new FlinkException("Test exception");
         jobGraphStore =
                 TestingJobGraphStore.newBuilder()
@@ -588,7 +653,7 @@ public class SessionDispatcherLeaderProcessTest {
     }
 
     @Test
-    public void recoverJobs_withJobIdRecoveryFailure_failsFatally() throws Exception {
+    void recoverJobs_withJobIdRecoveryFailure_failsFatally() throws Exception {
         final FlinkException testException = new FlinkException("Test exception");
         jobGraphStore =
                 TestingJobGraphStore.newBuilder()
@@ -607,8 +672,8 @@ public class SessionDispatcherLeaderProcessTest {
             dispatcherLeaderProcess.start();
 
             // we expect that a fatal error occurred
-            assertThat(fatalErrorHandler.getErrorFuture())
-                    .succeedsWithin(100, TimeUnit.MILLISECONDS)
+            assertThatFuture(fatalErrorHandler.getErrorFuture())
+                    .eventuallySucceeds()
                     .satisfies(
                             error ->
                                     assertThat(error)
@@ -622,7 +687,7 @@ public class SessionDispatcherLeaderProcessTest {
     }
 
     @Test
-    public void onAddedJobGraph_failingRecoveredJobSubmission_failsFatally() throws Exception {
+    void onAddedJobGraph_failingRecoveredJobSubmission_failsFatally() throws Exception {
         final TestingDispatcherGateway dispatcherGateway =
                 TestingDispatcherGateway.newBuilder()
                         .setSubmitFunction(
@@ -647,8 +712,7 @@ public class SessionDispatcherLeaderProcessTest {
     }
 
     @Test
-    public void onAddedJobGraph_duplicateJobSubmissionDueToFalsePositive_willBeIgnored()
-            throws Exception {
+    void onAddedJobGraph_duplicateJobSubmissionDueToFalsePositive_willBeIgnored() throws Exception {
         final TestingDispatcherGateway dispatcherGateway =
                 TestingDispatcherGateway.newBuilder()
                         .setSubmitFunction(

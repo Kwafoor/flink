@@ -23,6 +23,7 @@ import org.apache.flink.core.classloading.SubmoduleClassLoader;
 import org.apache.flink.runtime.rpc.RpcSystem;
 import org.apache.flink.runtime.rpc.RpcSystemLoader;
 import org.apache.flink.runtime.rpc.exceptions.RpcLoaderException;
+import org.apache.flink.util.FileUtils;
 import org.apache.flink.util.IOUtils;
 
 import java.io.IOException;
@@ -43,6 +44,8 @@ import java.util.UUID;
  */
 public class AkkaRpcSystemLoader implements RpcSystemLoader {
 
+    static final int LOAD_PRIORITY = 0;
+
     /** The name of the akka dependency jar, bundled with flink-rpc-akka-loader module artifact. */
     private static final String FLINK_RPC_AKKA_FAT_JAR = "flink-rpc-akka.jar";
 
@@ -50,12 +53,17 @@ public class AkkaRpcSystemLoader implements RpcSystemLoader {
             "mvn clean package -pl flink-rpc/flink-rpc-akka,flink-rpc/flink-rpc-akka-loader -DskipTests";
 
     @Override
+    public int getLoadPriority() {
+        return LOAD_PRIORITY;
+    }
+
+    @Override
     public RpcSystem loadRpcSystem(Configuration config) {
         try {
             final ClassLoader flinkClassLoader = RpcSystem.class.getClassLoader();
 
             final Path tmpDirectory = Paths.get(ConfigurationUtils.parseTempDirectories(config)[0]);
-            Files.createDirectories(tmpDirectory);
+            Files.createDirectories(FileUtils.getTargetPathIfContainsSymbolicPath(tmpDirectory));
             final Path tempFile =
                     Files.createFile(
                             tmpDirectory.resolve("flink-rpc-akka_" + UUID.randomUUID() + ".jar"));
