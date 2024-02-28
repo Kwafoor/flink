@@ -20,11 +20,10 @@ package org.apache.flink.runtime.io.network.partition.hybrid.tiered.storage;
 
 import org.apache.flink.runtime.io.network.buffer.Buffer;
 import org.apache.flink.runtime.io.network.partition.hybrid.tiered.common.TieredStorageSubpartitionId;
+import org.apache.flink.util.function.TriConsumer;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.util.List;
-import java.util.function.BiConsumer;
 
 /**
  * Accumulates received records into buffers. The {@link BufferAccumulator} receives the records
@@ -36,17 +35,29 @@ public interface BufferAccumulator extends AutoCloseable {
      * Setup the accumulator.
      *
      * @param bufferFlusher accepts the accumulated buffers. The first field is the subpartition id,
-     *     while the list in the second field contains accumulated buffers in order for that
-     *     subpartition.
+     *     the second is the accumulated buffer to flush, and the third is the number of remaining
+     *     buffers to be written consecutively to the same segment.
      */
-    void setup(BiConsumer<TieredStorageSubpartitionId, List<Buffer>> bufferFlusher);
+    void setup(TriConsumer<TieredStorageSubpartitionId, Buffer, Integer> bufferFlusher);
 
     /**
      * Receives the records from tiered store producer, these records will be accumulated and
      * transformed into finished buffers.
+     *
+     * <p>Note that when isBroadcast is true, for a broadcast-only partition, the subpartitionId
+     * value will always be 0. Conversely, for a non-broadcast-only partition, the subpartitionId
+     * value will range from 0 to the number of subpartitions.
+     *
+     * @param record the received record
+     * @param subpartitionId the subpartition id of the record
+     * @param dataType the data type of the record
+     * @param isBroadcast whether the record is a broadcast record
      */
     void receive(
-            ByteBuffer record, TieredStorageSubpartitionId subpartitionId, Buffer.DataType dataType)
+            ByteBuffer record,
+            TieredStorageSubpartitionId subpartitionId,
+            Buffer.DataType dataType,
+            boolean isBroadcast)
             throws IOException;
 
     /**

@@ -25,13 +25,34 @@ under the License.
 	<parent>
 		<groupId>org.apache.flink</groupId>
 		<artifactId>flink-parent</artifactId>
-		<version>1.18-SNAPSHOT</version>
+		<version>1.20-SNAPSHOT</version>
 	</parent>
 
 	<artifactId>flink-runtime</artifactId>
 	<name>Flink : Runtime</name>
 
 	<packaging>jar</packaging>
+
+	<properties>
+		<!--
+		Two properties below should be merged once support for jdk8 and jdk11 is dropped.
+		The reason of extraction into a separate property with profile is that
+		specifying -Djava.security.manager=allow within ${surefire.module.config} leads to
+		hanging of surefire for jdk8 and jdk11
+		-->
+		<surefire.module.config.jdk21></surefire.module.config.jdk21>
+		<surefire.module.config> ${surefire.module.config.jdk21} <!--
+			JobManagerProcessUtilsTest
+			-->--add-opens=java.base/java.util=ALL-UNNAMED <!--
+			ConnectionUtilsTest
+			-->--add-opens=java.base/java.lang=ALL-UNNAMED <!--
+			-->--add-opens=java.base/java.net=ALL-UNNAMED <!--
+			OperatorStateBackendTest
+			-->--add-opens=java.base/java.io=ALL-UNNAMED <!--
+			AsynchronousFileIOChannelTest
+			-->--add-opens=java.base/java.util.concurrent=ALL-UNNAMED
+		</surefire.module.config>
+	</properties>
 
 	<dependencies>
 
@@ -192,6 +213,13 @@ under the License.
 		<dependency>
 			<groupId>org.xerial.snappy</groupId>
 			<artifactId>snappy-java</artifactId>
+		</dependency>
+
+		<!-- Async Profiler library -->
+		<dependency>
+			<groupId>tools.profiler</groupId>
+			<artifactId>async-profiler</artifactId>
+			<version>2.9</version>
 		</dependency>
 
 		<!-- Lz4 compression library -->
@@ -457,6 +485,18 @@ under the License.
 					</plugin>
 				</plugins>
 			</build>
+		</profile>
+		<profile>
+			<id>java21</id>
+			<activation>
+				<jdk>[21,)</jdk>
+			</activation>
+
+			<properties>
+				<surefire.module.config.jdk21> <!--
+					required by AbstractFineGrainedSlotManagerITCase-->
+					-Djava.security.manager=allow</surefire.module.config.jdk21>
+			</properties>
 		</profile>
 	</profiles>
 </project>

@@ -35,8 +35,8 @@ import org.apache.flink.runtime.taskmanager.TaskManagerLocation;
 import org.apache.flink.runtime.webmonitor.retriever.GatewayRetriever;
 import org.apache.flink.runtime.webmonitor.stats.VertexStatsTracker;
 
-import org.apache.flink.shaded.guava30.com.google.common.cache.Cache;
-import org.apache.flink.shaded.guava30.com.google.common.collect.ImmutableSet;
+import org.apache.flink.shaded.guava31.com.google.common.cache.Cache;
+import org.apache.flink.shaded.guava31.com.google.common.collect.ImmutableSet;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -317,9 +317,10 @@ public class VertexThreadInfoTracker implements VertexStatsTracker<VertexThreadI
                 new HashMap<>();
 
         for (AccessExecutionVertex executionVertex : executionVertices) {
-            if (executionVertex.getExecutionState() != ExecutionState.RUNNING) {
+            if (executionVertex.getExecutionState() != ExecutionState.RUNNING
+                    && executionVertex.getExecutionState() != ExecutionState.INITIALIZING) {
                 LOG.trace(
-                        "{} not running, but {}; not sampling",
+                        "{} not running or initializing, but {}; not sampling",
                         executionVertex.getTaskNameWithSubtaskIndex(),
                         executionVertex.getExecutionState());
                 continue;

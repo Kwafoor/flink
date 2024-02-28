@@ -21,10 +21,10 @@ package org.apache.flink.streaming.api.functions.source.datagen;
 import org.apache.flink.annotation.Experimental;
 import org.apache.flink.api.common.functions.RuntimeContext;
 import org.apache.flink.runtime.state.FunctionInitializationContext;
+import org.apache.flink.util.CollectionUtil;
 
 import org.apache.commons.math3.random.RandomDataGenerator;
 
-import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Supplier;
@@ -35,6 +35,7 @@ public abstract class RandomGenerator<T> implements DataGenerator<T> {
 
     protected transient RandomDataGenerator random;
     protected float nullRate;
+    protected boolean varLen;
 
     @Override
     public void open(
@@ -53,6 +54,11 @@ public abstract class RandomGenerator<T> implements DataGenerator<T> {
             return supplier.get();
         }
         return null;
+    }
+
+    public RandomGenerator<T> withVarLen(boolean varLen) {
+        this.varLen = varLen;
+        return this;
     }
 
     @Override
@@ -174,7 +180,7 @@ public abstract class RandomGenerator<T> implements DataGenerator<T> {
 
             @Override
             public Map<K, V> next() {
-                Map<K, V> map = new HashMap<>(size);
+                Map<K, V> map = CollectionUtil.newHashMapWithExpectedSize(size);
                 for (int i = 0; i < size; i++) {
                     map.put(key.next(), value.next());
                 }

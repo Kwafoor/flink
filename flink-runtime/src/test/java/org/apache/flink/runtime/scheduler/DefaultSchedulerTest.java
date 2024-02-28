@@ -25,6 +25,7 @@ import org.apache.flink.api.common.time.Time;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.MetricOptions;
 import org.apache.flink.configuration.WebOptions;
+import org.apache.flink.core.execution.JobStatusHook;
 import org.apache.flink.core.failure.FailureEnricher;
 import org.apache.flink.core.failure.TestingFailureEnricher;
 import org.apache.flink.core.testutils.OneShotLatch;
@@ -51,12 +52,11 @@ import org.apache.flink.runtime.executiongraph.ArchivedExecutionVertex;
 import org.apache.flink.runtime.executiongraph.ErrorInfo;
 import org.apache.flink.runtime.executiongraph.ExecutionAttemptID;
 import org.apache.flink.runtime.executiongraph.ExecutionVertex;
-import org.apache.flink.runtime.executiongraph.JobStatusHook;
 import org.apache.flink.runtime.executiongraph.TestingJobStatusHook;
-import org.apache.flink.runtime.executiongraph.failover.flip1.FailoverStrategy;
-import org.apache.flink.runtime.executiongraph.failover.flip1.RestartAllFailoverStrategy;
-import org.apache.flink.runtime.executiongraph.failover.flip1.RestartPipelinedRegionFailoverStrategy;
-import org.apache.flink.runtime.executiongraph.failover.flip1.TestRestartBackoffTimeStrategy;
+import org.apache.flink.runtime.executiongraph.failover.FailoverStrategy;
+import org.apache.flink.runtime.executiongraph.failover.RestartAllFailoverStrategy;
+import org.apache.flink.runtime.executiongraph.failover.RestartPipelinedRegionFailoverStrategy;
+import org.apache.flink.runtime.executiongraph.failover.TestRestartBackoffTimeStrategy;
 import org.apache.flink.runtime.executiongraph.utils.SimpleAckingTaskManagerGateway;
 import org.apache.flink.runtime.executiongraph.utils.TestFailoverStrategyFactory;
 import org.apache.flink.runtime.failure.FailureEnricherUtils;
@@ -101,16 +101,16 @@ import org.apache.flink.runtime.util.ResourceCounter;
 import org.apache.flink.util.ExecutorUtils;
 import org.apache.flink.util.FlinkException;
 import org.apache.flink.util.Preconditions;
-import org.apache.flink.util.TestLogger;
 import org.apache.flink.util.concurrent.ManuallyTriggeredScheduledExecutor;
 import org.apache.flink.util.concurrent.ScheduledExecutor;
 
-import org.apache.flink.shaded.guava30.com.google.common.collect.Iterables;
+import org.apache.flink.shaded.guava31.com.google.common.collect.Iterables;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -128,6 +128,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
@@ -145,7 +146,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Tests for {@link DefaultScheduler}. */
-public class DefaultSchedulerTest extends TestLogger {
+public class DefaultSchedulerTest {
+
+    private static final Logger LOG = LoggerFactory.getLogger(DefaultSchedulerTest.class);
 
     private static final int TIMEOUT_MS = 1000;
 
@@ -641,6 +644,28 @@ public class DefaultSchedulerTest extends TestLogger {
         assertThat(deployedExecutionVertices).contains(executionVertexId, executionVertexId);
     }
 
+    @Test
+    void testRestoreVertexEndOfDataListener() throws Exception {
+        final JobGraph jobGraph = singleNonParallelJobVertexJobGraph();
+        enableCheckpointing(jobGraph, null, null, Long.MAX_VALUE - 1, true);
+
+        final DefaultScheduler scheduler = createSchedulerAndStartScheduling(jobGraph);
+        final ArchivedExecutionVertex onlyExecutionVertex =
+                Iterables.getOnlyElement(
+                        scheduler
+                                .requestJob()
+                                .getArchivedExecutionGraph()
+                                .getAllExecutionVertices());
+        final ExecutionAttemptID attemptId =
+                onlyExecutionVertex.getCurrentExecutionAttempt().getAttemptId();
+
+        scheduler.notifyEndOfData(attemptId);
+        assertThat(scheduler.getVertexEndOfDataListener().areAllTasksEndOfData()).isTrue();
+
+        scheduler.restoreState(Collections.singleton(attemptId.getExecutionVertexId()), true);
+        assertThat(scheduler.getVertexEndOfDataListener().areAllTasksEndOfData()).isFalse();
+    }
+
     /**
      * This test covers the use-case where a global fail-over is followed by a local task failure.
      * It verifies (besides checking the expected deployments) that the assert in the global
@@ -891,7 +916,7 @@ public class DefaultSchedulerTest extends TestLogger {
         final long checkpointId =
                 checkpointCoordinator.getPendingCheckpoints().keySet().iterator().next();
         OneShotLatch latch = new OneShotLatch();
-        executor.execute(
+        mainThreadExecutor.execute(
                 () -> {
                     try {
                         final AcknowledgeCheckpoint acknowledgeCheckpoint =
@@ -1416,6 +1441,9 @@ public class DefaultSchedulerTest extends TestLogger {
 
     @Test
     void testExceptionHistoryConcurrentRestart() throws Exception {
+        AtomicBoolean isNewAttempt = new AtomicBoolean(true);
+        testRestartBackoffTimeStrategy.setIsNewAttempt(isNewAttempt::get);
+
         final JobGraph jobGraph = singleJobVertexJobGraph(2);
 
         final TaskManagerLocation taskManagerLocation = new LocalTaskManagerLocation();
@@ -1452,9 +1480,9 @@ public class DefaultSchedulerTest extends TestLogger {
                         exception0);
 
         // multi-ExecutionVertex failure
+        isNewAttempt.set(false);
         final RuntimeException exception1 = new RuntimeException("failure #1");
-        failoverStrategyFactory.setTasksToRestart(
-                executionVertex1.getID(), executionVertex0.getID());
+        failoverStrategyFactory.setTasksToRestart(executionVertex1.getID());
         final long updateStateTriggeringRestartTimestamp1 =
                 initiateFailure(
                         scheduler,
@@ -1467,7 +1495,7 @@ public class DefaultSchedulerTest extends TestLogger {
 
         delayExecutor.triggerNonPeriodicScheduledTasks();
 
-        assertThat(scheduler.getExceptionHistory()).hasSize(2);
+        assertThat(scheduler.getExceptionHistory()).hasSize(1);
         final Iterator<RootExceptionHistoryEntry> actualExceptionHistory =
                 scheduler.getExceptionHistory().iterator();
 
@@ -1489,17 +1517,6 @@ public class DefaultSchedulerTest extends TestLogger {
                                         updateStateTriggeringRestartTimestamp1,
                                         executionVertex1.getTaskNameWithSubtaskIndex(),
                                         executionVertex1.getCurrentAssignedResourceLocation()));
-
-        final RootExceptionHistoryEntry entry1 = actualExceptionHistory.next();
-        assertThat(
-                        ExceptionHistoryEntryTestingUtils.matchesFailure(
-                                entry1,
-                                exception1,
-                                updateStateTriggeringRestartTimestamp1,
-                                executionVertex1.getTaskNameWithSubtaskIndex(),
-                                executionVertex1.getCurrentAssignedResourceLocation()))
-                .isTrue();
-        assertThat(entry1.getConcurrentExceptions()).isEmpty();
     }
 
     @Test
@@ -1763,7 +1780,7 @@ public class DefaultSchedulerTest extends TestLogger {
                         }
                     },
                     executorService,
-                    log);
+                    LOG);
         } finally {
             executorService.shutdownNow();
         }
@@ -2093,7 +2110,7 @@ public class DefaultSchedulerTest extends TestLogger {
                         executor,
                         scheduledExecutorService,
                         taskRestartExecutor)
-                .setLogger(log)
+                .setLogger(LOG)
                 .setJobMasterConfiguration(configuration)
                 .setSchedulingStrategyFactory(new PipelinedRegionSchedulingStrategy.Factory())
                 .setFailoverStrategyFactory(new RestartPipelinedRegionFailoverStrategy.Factory())
